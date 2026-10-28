@@ -1,0 +1,503 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NBA 2K20 ROS Maker</title>
+<style>
+:root{--bg:#fff;--fg:#111;--mut:#666;--bd:#ccc;--ac:#c8102e;--cd:#f4f4f4}
+@media(prefers-color-scheme:dark){:root{--bg:#121212;--fg:#eee;--mut:#999;--bd:#333;--cd:#1e1e1e}}
+body{margin:0;padding:10px;background:var(--bg);color:var(--fg);font:14px system-ui,sans-serif}
+h1{font-size:18px;margin:4px 0}h2{font-size:15px;margin:14px 0 6px}
+input,select,button,textarea{font:inherit;color:var(--fg);background:var(--cd);border:1px solid var(--bd);border-radius:6px;padding:6px}
+button{background:var(--ac);color:#fff;border:0;padding:8px 12px;margin:2px}button.s{background:var(--cd);color:var(--fg);border:1px solid var(--bd)}
+pre{background:var(--cd);border:1px solid var(--bd);border-radius:6px;padding:6px;overflow-x:auto;font-size:11px;max-height:320px;margin:4px 0}
+.row{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin:4px 0}.n{color:var(--mut);font-size:12px}
+#toast{position:fixed;left:10px;right:10px;bottom:14px;padding:12px 14px;border-radius:8px;background:#222;color:#fff;font-size:14px;z-index:99;display:none;box-shadow:0 2px 10px rgba(0,0,0,.4)}
+#toast.ok{background:#0a7d32}#toast.bad{background:#b3261e}
+button:disabled{opacity:.45}
+</style></head><body>
+<h1>NBA 2K20 ROS Maker</h1>
+<p class="n">Opens a version-5 ROS, decrypts and unpacks it, lets you edit the roster data, then rebuilds a correctly encrypted ROS with fresh checksums. Player records are shown as raw bytes (their layout isn't mapped yet).</p>
+<h2>1. Open a ROS</h2>
+<div class="row"><input type="file" id="f1" onchange="loadRos(event)"></div>
+<div id="info" class="n"></div><div id="st" class="n"></div>
+<h2>2. Look and edit</h2>
+<div class="row"><input id="voff" size="8" value="0"><button class="s" onclick="goto()">Go (hex)</button><button class="s" onclick="pageMove(-1)">&lt; Prev</button><button class="s" onclick="pageMove(1)">Next &gt;</button><button class="s" onclick="dirView()">Table list</button></div>
+<pre id="hexv">(no file loaded)</pre>
+<div class="row"><input id="q" placeholder="Search" size="14"><select id="qm"><option value="ascii">ASCII</option><option value="u16">UTF-16</option><option value="hex">Hex</option></select><button class="s" onclick="find()">Find</button></div>
+<div class="row"><input id="rv" placeholder="replace (hex, same length)" size="20"><button class="s" onclick="replaceAll()">Replace all</button></div>
+<div class="row"><input id="poff" placeholder="offset (hex)" size="9"><input id="pval" placeholder="bytes (hex)" size="16"><button class="s" onclick="patch()">Patch</button></div>
+<h2>Player rows (NBA2K20 layout)</h2>
+<p class="n">3,414 player records, each exactly 4,075 bits (not byte-aligned). Fields below use positions decoded from the file. Names are stored as references into a text pool I haven't located yet.</p>
+<div class="row"><input id="ridx" size="5" value="4"><button class="s" onclick="rowView()">Show player</button><button class="s" onclick="rowStep(-1)">&lt;</button><button class="s" onclick="rowStep(1)">&gt;</button></div>
+<div class="row"><input id="jnum" placeholder="new jersey" size="9"><button class="s" onclick="jerseySet()">Set jersey (this row)</button></div>
+<div class="row"><input id="bpos" placeholder="bit pos" size="7"><input id="bw" placeholder="width" size="5"><input id="bval" placeholder="value" size="7"><button class="s" onclick="bitGet()">Read bits</button><button class="s" onclick="bitSet()">Write bits</button></div>
+<div class="row"><input id="csrc" placeholder="copy row #" size="8"><input id="cdst" placeholder="over row #" size="8"><button class="s" onclick="rowCopy()">Copy row</button></div>
+<div class="row"><input id="jfrom" size="5" value="0"><button class="s" onclick="jerseyList()">List 60 jerseys from row</button></div>
+<h2>Update to current NBA rosters</h2>
+<p class="n">Matches today's NBA players (from ESPN, needs internet) to the 2K20 rows by name, then moves players to their current teams and updates jersey numbers. Rookies and new players can't be added yet. Experimental: test in the game.</p>
+<div class="row"><button class="s" onclick="previewUpdate()">Preview changes</button><label class="n"><input type="checkbox" id="relchk"> also release players not on a current roster</label></div>
+<p class="n">No internet access in this page? Paste the current rosters here (one player per line: Name, Team, Jersey), or choose the CSV/JSON saved from the roster tool.</p>
+<div class="row"><textarea id="rtext" rows="4" placeholder="Joel Embiid, PHI, 21&#10;Giannis Antetokounmpo, MIL, 34"></textarea></div>
+<div class="row"><input type="file" onchange="loadRosterFile(event)"><button class="s" onclick="previewPasted()">Preview from pasted data</button></div>
+<div class="row"><button id="applybtn" onclick="applyUpdate()" disabled>Apply changes</button></div>
+<div class="row"><input id="nq" placeholder="Find player by name" size="18"><button class="s" onclick="findName()">Find</button></div>
+<h2>3. Export</h2>
+<div class="row"><button onclick="expRos()">Export ROS</button><button class="s" onclick="expData()">Save decoded .bin</button><label class="n">Load edited .bin <input type="file" onchange="impData(event)"></label></div>
+<h2>Compare two ROS files</h2>
+<p class="n">Open one ROS above, load a second one here, and press Diff to see which bytes differ. Useful for finding where a player's fields live: change one thing in the game, save the roster, and compare.</p>
+<div class="row"><input type="file" onchange="loadOther(event)"><button class="s" onclick="diff()">Diff</button></div>
+<pre id="res"></pre>
+<div id="toast"></div>
+<script>
+
+var KEYS=[[2764122, 5849030], [7482322, 4880301], [8267512, 813496], [8139466, 14660329], [7429491, 3187299], [15557593, 7375878], [1562521, 795802], [6232531, 2977857], [1796921, 6949409], [9256349, 5253402], [5713613, 332056], [6028448, 12660832], [14200302, 6326828], [15787535, 1055902], [6397734, 856241], [15906408, 11035296]];
+var IPT=[58, 50, 42, 34, 26, 18, 10, 2, 60, 52, 44, 36, 28, 20, 12, 4, 62, 54, 46, 38, 30, 22, 14, 6, 64, 56, 48, 40, 32, 24, 16, 8, 57, 49, 41, 33, 25, 17, 9, 1, 59, 51, 43, 35, 27, 19, 11, 3, 61, 53, 45, 37, 29, 21, 13, 5, 63, 55, 47, 39, 31, 23, 15, 7],FPT=[40, 8, 48, 16, 56, 24, 64, 32, 39, 7, 47, 15, 55, 23, 63, 31, 38, 6, 46, 14, 54, 22, 62, 30, 37, 5, 45, 13, 53, 21, 61, 29, 36, 4, 44, 12, 52, 20, 60, 28, 35, 3, 43, 11, 51, 19, 59, 27, 34, 2, 42, 10, 50, 18, 58, 26, 33, 1, 41, 9, 49, 17, 57, 25],PT=[16, 7, 20, 21, 29, 12, 28, 17, 1, 15, 23, 26, 5, 18, 31, 10, 2, 8, 24, 14, 32, 27, 3, 9, 19, 13, 30, 6, 22, 11, 4, 25],SB=[[14, 4, 13, 1, 2, 15, 11, 8, 3, 10, 6, 12, 5, 9, 0, 7, 0, 15, 7, 4, 14, 2, 13, 1, 10, 6, 12, 11, 9, 5, 3, 8, 4, 1, 14, 8, 13, 6, 2, 11, 15, 12, 9, 7, 3, 10, 5, 0, 15, 12, 8, 2, 4, 9, 1, 7, 5, 11, 3, 14, 10, 0, 6, 13], [15, 1, 8, 14, 6, 11, 3, 4, 9, 7, 2, 13, 12, 0, 5, 10, 3, 13, 4, 7, 15, 2, 8, 14, 12, 0, 1, 10, 6, 9, 11, 5, 0, 14, 7, 11, 10, 4, 13, 1, 5, 8, 12, 6, 9, 3, 2, 15, 13, 8, 10, 1, 3, 15, 4, 2, 11, 6, 7, 12, 0, 5, 14, 9], [10, 0, 9, 14, 6, 3, 15, 5, 1, 13, 12, 7, 11, 4, 2, 8, 13, 7, 0, 9, 3, 4, 6, 10, 2, 8, 5, 14, 12, 11, 15, 1, 13, 6, 4, 9, 8, 15, 3, 0, 11, 1, 2, 12, 5, 10, 14, 7, 1, 10, 13, 0, 6, 9, 8, 7, 4, 15, 14, 3, 11, 5, 2, 12], [7, 13, 14, 3, 0, 6, 9, 10, 1, 2, 8, 5, 11, 12, 4, 15, 13, 8, 11, 5, 6, 15, 0, 3, 4, 7, 2, 12, 1, 10, 14, 9, 10, 6, 9, 0, 12, 11, 7, 13, 15, 1, 3, 14, 5, 2, 8, 4, 3, 15, 0, 6, 10, 1, 13, 8, 9, 4, 5, 11, 12, 7, 2, 14], [2, 12, 4, 1, 7, 10, 11, 6, 8, 5, 3, 15, 13, 0, 14, 9, 14, 11, 2, 12, 4, 7, 13, 1, 5, 0, 15, 10, 3, 9, 8, 6, 4, 2, 1, 11, 10, 13, 7, 8, 15, 9, 12, 5, 6, 3, 0, 14, 11, 8, 12, 7, 1, 14, 2, 13, 6, 15, 0, 9, 10, 4, 5, 3], [12, 1, 10, 15, 9, 2, 6, 8, 0, 13, 3, 4, 14, 7, 5, 11, 10, 15, 4, 2, 7, 12, 9, 5, 6, 1, 13, 14, 0, 11, 3, 8, 9, 14, 15, 5, 2, 8, 12, 3, 7, 0, 4, 10, 1, 13, 11, 6, 4, 3, 2, 12, 9, 5, 15, 10, 11, 14, 1, 7, 6, 0, 8, 13], [4, 11, 2, 14, 15, 0, 8, 13, 3, 12, 9, 7, 5, 10, 6, 1, 13, 0, 11, 7, 4, 9, 1, 10, 14, 3, 5, 12, 2, 15, 8, 6, 1, 4, 11, 13, 12, 3, 7, 14, 10, 15, 6, 8, 0, 5, 9, 2, 6, 11, 13, 8, 1, 4, 10, 7, 9, 5, 0, 15, 14, 2, 3, 12], [13, 2, 8, 4, 6, 15, 11, 1, 10, 9, 3, 14, 5, 0, 12, 7, 1, 15, 13, 8, 10, 3, 7, 4, 12, 5, 6, 11, 0, 14, 9, 2, 7, 11, 4, 1, 9, 12, 14, 2, 0, 6, 10, 13, 15, 3, 5, 8, 2, 1, 14, 7, 4, 10, 8, 13, 15, 12, 9, 0, 3, 5, 6, 11]];
+var SP=null;
+function initDES(){
+  if(SP)return;
+  SP=[];
+  for(var i=0;i<8;i++){
+    var t=new Int32Array(64);
+    for(var x=0;x<64;x++){
+      var row=((x>>5)&1)*2+(x&1),col=(x>>1)&15;
+      var v=SB[i][row*16+col];
+      var out=v<<(28-4*i);
+      var p=0;
+      for(var j=0;j<32;j++){ var src=PT[j]-1; p|=((out>>>(31-src))&1)<<(31-j); }
+      t[x]=p|0;
+    }
+    SP.push(t);
+  }
+}
+function permBits(hi,lo,table,n){
+  var rh=0,rl=0;
+  for(var i=0;i<n;i++){
+    var s=table[i]-1; var b=s<32?((hi>>>(31-s))&1):((lo>>>(63-s))&1);
+    if(i<32)rh|=b<<(31-i); else rl|=b<<(63-i);
+  }
+  return [rh|0,rl|0];
+}
+function feistel(R,kh,kl){
+  var r1=((R>>>1)|(R<<31))>>>0;
+  var out=0;
+  out^=SP[0][((r1>>>26)&63)^((kh>>>18)&63)];
+  out^=SP[1][((r1>>>22)&63)^((kh>>>12)&63)];
+  out^=SP[2][((r1>>>18)&63)^((kh>>>6)&63)];
+  out^=SP[3][((r1>>>14)&63)^(kh&63)];
+  out^=SP[4][((r1>>>10)&63)^((kl>>>18)&63)];
+  out^=SP[5][((r1>>>6)&63)^((kl>>>12)&63)];
+  out^=SP[6][((r1>>>2)&63)^((kl>>>6)&63)];
+  out^=SP[7][(((r1<<2)|(r1>>>30))&63)^(kl&63)];
+  return out|0;
+}
+function desBlock(hi,lo,decrypt){
+  var a=permBits(hi,lo,IPT,64),L=a[0],R=a[1];
+  for(var r=0;r<16;r++){
+    var k=KEYS[decrypt?15-r:r];
+    var t=R; R=(L^feistel(R,k[0],k[1]))|0; L=t;
+  }
+  return permBits(R,L,FPT,64);
+}
+function be32(d,o){return ((d[o]<<24)|(d[o+1]<<16)|(d[o+2]<<8)|d[o+3])|0;}
+function put32(d,o,v){d[o]=(v>>>24)&255;d[o+1]=(v>>>16)&255;d[o+2]=(v>>>8)&255;d[o+3]=v&255;}
+function cbcDecrypt(data,iv){
+  initDES();
+  var out=new Uint8Array(data.length),ph=be32(iv,0),pl=be32(iv,4);
+  for(var o=0;o<data.length;o+=8){
+    var ch=be32(data,o),cl=be32(data,o+4);
+    var b=desBlock(ch,cl,true);
+    put32(out,o,b[0]^ph);put32(out,o+4,b[1]^pl);
+    ph=ch;pl=cl;
+  }
+  return out;
+}
+function cbcEncrypt(data,iv){
+  initDES();
+  var out=new Uint8Array(data.length),ph=be32(iv,0),pl=be32(iv,4);
+  for(var o=0;o<data.length;o+=8){
+    var b=desBlock(be32(data,o)^ph,be32(data,o+4)^pl,false);
+    put32(out,o,b[0]);put32(out,o+4,b[1]);
+    ph=b[0];pl=b[1];
+  }
+  return out;
+}
+var CRCT=null;
+function crc32(d,s,e){
+  if(!CRCT){CRCT=new Int32Array(256);for(var i=0;i<256;i++){var c=i;for(var k=0;k<8;k++)c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);CRCT[i]=c;}}
+  var c=-1;for(var i=s;i<e;i++)c=CRCT[(c^d[i])&255]^(c>>>8);return (~c)>>>0;
+}
+async function streamBytes(stream){
+  var reader=stream.getReader(),chunks=[],total=0;
+  for(;;){var r=await reader.read();if(r.done)break;chunks.push(r.value);total+=r.value.length;}
+  var out=new Uint8Array(total),o=0;for(var i=0;i<chunks.length;i++){out.set(chunks[i],o);o+=chunks[i].length;}
+  return out;
+}
+async function inflate(d){
+  var ds=new DecompressionStream('deflate');
+  var w=ds.writable.getWriter();w.write(d);w.close();
+  return streamBytes(ds.readable);
+}
+async function deflate(d){
+  var cs=new CompressionStream('deflate');
+  var w=cs.writable.getWriter();w.write(d);w.close();
+  return streamBytes(cs.readable);
+}
+function rd32(d,o){return ((d[o]<<24)|(d[o+1]<<16)|(d[o+2]<<8)|d[o+3])>>>0;}
+function rl32(d,o){return (d[o]|(d[o+1]<<8)|(d[o+2]<<16)|(d[o+3]<<24))>>>0;}
+async function parseRos(file){
+  var magic=rd32(file,4),ver=rd32(file,8),size=rd32(file,12);
+  if(magic!==0x2ec027d7)throw new Error('Not a ROS file (magic '+magic.toString(16)+')');
+  var info={ver:ver,size:size,hdr:file.slice(0,24),crcOk:crc32(file,4,size)===rd32(file,0)};
+  var pay=file.subarray(24,24+size);
+  var iv=pay.slice(0,8);
+  var plain=cbcDecrypt(pay.subarray(8),iv);
+  var inner=rl32(plain,0),len=rl32(plain,4);
+  info.innerCrcOk=(crc32(plain,4,plain.length)===inner);
+  info.streamLen=len;
+  var z=await inflate(plain.subarray(8,8+len));
+  return {info:info,data:z};
+}
+async function buildRos(data,hdr){
+  var comp=await deflate(data);
+  var plainLen=8+comp.length; plainLen+=(8-(plainLen&7))&7;
+  var plain=new Uint8Array(plainLen);
+  plain.set(comp,8);
+  var v=new DataView(plain.buffer);
+  v.setUint32(4,comp.length,true);
+  v.setUint32(0,crc32(plain,4,plain.length),true);
+  var iv=new Uint8Array(8);
+  if(typeof crypto!=='undefined'&&crypto.getRandomValues)crypto.getRandomValues(iv);else for(var i=0;i<8;i++)iv[i]=Math.floor(Math.random()*256);
+  var enc=cbcEncrypt(plain,iv);
+  var size=8+enc.length;
+  var file=new Uint8Array(24+size);
+  file.set(hdr.subarray(0,24),0);
+  var fv=new DataView(file.buffer);
+  fv.setUint32(4,0x2ec027d7);fv.setUint32(8,5);fv.setUint32(12,size);
+  file.set(iv,24);file.set(enc,32);
+  fv.setUint32(0,crc32(file,4,size));
+  return file;
+}
+
+var CUR=null,HDR=null,NAME='roster';
+function $(i){return document.getElementById(i)}
+var TT=null;
+function toast(t,kind){
+  var e=$('toast');e.textContent=t;e.className=kind||'';e.style.display='block';
+  if(TT)clearTimeout(TT);TT=setTimeout(function(){e.style.display='none'},kind=='bad'?9000:6000);
+}
+function st(t,kind){
+  $('st').textContent=t;
+  if(!kind){kind=/^(Error|Could not|Bad|Check|Layout|Load|Press|Row|No |Nothing|Jersey|This file)/.test(t)?'bad':(/^(Applied|Preview ready|Exported|Loaded|Wrote|Patched|Copied|Replaced)/.test(t)?'ok':'')}
+  toast(t,kind);
+}
+function hx(d,s,n){var o='';for(var i=s;i<Math.min(s+n,d.length);i++)o+=('0'+d[i].toString(16)).slice(-2)+' ';return o}
+function txt(d,s,n){var o='';for(var i=s;i<Math.min(s+n,d.length);i++){var c=d[i];o+=(c>=32&&c<127)?String.fromCharCode(c):'.'}return o}
+async function readFile(f){return new Uint8Array(await f.arrayBuffer())}
+async function loadRos(ev){
+  var f=ev.target.files[0];if(!f)return;
+  try{
+    st('Reading...');var d=await readFile(f);
+    st('Decrypting (this takes a few seconds)...');await new Promise(function(r){setTimeout(r,30)});
+    var r=await parseRos(d);
+    CUR=r.data;HDR=r.info.hdr;NAME=f.name.replace(/\.ros$/i,'');
+    $('info').textContent='Version '+r.info.ver+' | file CRC '+(r.info.crcOk?'OK':'BAD')+' | inner CRC '+(r.info.innerCrcOk?'OK':'BAD')+' | roster data '+CUR.length+' bytes';
+    st('Loaded '+f.name);view(0);
+  }catch(e){st('Error: '+e.message)}
+}
+function view(off){
+  if(!CUR)return;off=Math.max(0,Math.min(off,CUR.length-1));$('voff').value=off.toString(16);
+  var o='';for(var i=0;i<16;i++){var a=off+i*16;if(a>=CUR.length)break;o+=('00000000'+a.toString(16)).slice(-8)+'  '+hx(CUR,a,16)+' '+txt(CUR,a,16)+'\n'}
+  $('hexv').textContent=o;
+}
+function goto(){view(parseInt($('voff').value,16)||0)}
+function pageMove(n){view((parseInt($('voff').value,16)||0)+n*256)}
+function pattern(){
+  var q=$('q').value,m=$('qm').value;
+  if(m=='hex'){var a=q.replace(/[^0-9a-fA-F]/g,'');var p=[];for(var i=0;i+1<a.length;i+=2)p.push(parseInt(a.substr(i,2),16));return p}
+  var p=[];for(var i=0;i<q.length;i++){var c=q.charCodeAt(i);p.push(c&255);if(m=='u16')p.push(c>>8)}return p
+}
+function find(){
+  if(!CUR)return;var p=pattern();if(!p.length)return;var hits=[];
+  for(var i=0;i<=CUR.length-p.length&&hits.length<100;i++){var k=0;while(k<p.length&&CUR[i+k]===p[k])k++;if(k==p.length)hits.push(i)}
+  $('res').textContent=hits.length?hits.map(function(h){return h.toString(16)+': '+hx(CUR,h,16)}).join('\n'):'No match';
+  if(hits.length)view(hits[0]-(hits[0]%16));
+}
+function patch(){
+  if(!CUR)return;var off=parseInt($('poff').value,16),a=$('pval').value.replace(/[^0-9a-fA-F]/g,'');
+  if(isNaN(off)){st('Bad offset');return}
+  for(var i=0;i+1<a.length;i+=2){if(off+i/2<CUR.length)CUR[off+i/2]=parseInt(a.substr(i,2),16)}
+  st('Patched '+(a.length/2)+' bytes at '+off.toString(16));view(off-(off%16));
+}
+function replaceAll(){
+  if(!CUR)return;var p=pattern();var r=$('rv').value.replace(/[^0-9a-fA-F]/g,'');var rb=[];for(var i=0;i+1<r.length;i+=2)rb.push(parseInt(r.substr(i,2),16));
+  if(!p.length||rb.length!==p.length){st('Replace needs same length (pattern '+p.length+' bytes, replacement '+rb.length+')');return}
+  var n=0;for(var i=0;i<=CUR.length-p.length;i++){var k=0;while(k<p.length&&CUR[i+k]===p[k])k++;if(k==p.length){for(var j=0;j<p.length;j++)CUR[i+j]=rb[j];n++;i+=p.length-1}}
+  st('Replaced '+n+' places');
+}
+function saveBlob(d,name){var a=document.createElement('a');a.href=URL.createObjectURL(new Blob([d]));a.download=name;document.body.appendChild(a);a.click();setTimeout(function(){a.remove()},500)}
+function expData(){if(CUR)saveBlob(CUR,NAME+'_decoded.bin')}
+async function impData(ev){var f=ev.target.files[0];if(!f)return;CUR=await readFile(f);st('Imported '+CUR.length+' bytes of roster data');view(0)}
+async function expRos(){
+  if(!CUR||!HDR){st('Load a ROS first (its header is used as the template)');return}
+  try{
+    st('Compressing + encrypting (a few seconds)...');await new Promise(function(r){setTimeout(r,30)});
+    var f=await buildRos(CUR,HDR);
+    var chk=await parseRos(f);
+    var ok=chk.info.crcOk&&chk.info.innerCrcOk&&chk.data.length===CUR.length;
+    saveBlob(f,NAME+'_new.ROS');st('Exported '+NAME+'_new.ROS ('+f.length+' bytes). Self-check '+(ok?'passed':'FAILED'));
+  }catch(e){st('Error: '+e.message)}
+}
+var OTHER=null;
+async function loadOther(ev){
+  var f=ev.target.files[0];if(!f)return;
+  try{st('Decrypting second file...');await new Promise(function(r){setTimeout(r,30)});
+    var raw=await readFile(f);if(raw.length>24&&rd32(raw,4)===0x2ec027d7){var r=await parseRos(raw);OTHER=r.data}else{OTHER=raw}st('Second file loaded ('+OTHER.length+' bytes). Press Diff.')}catch(e){st('Error: '+e.message)}
+}
+function diff(){
+  if(!CUR||!OTHER){st('Load both files first');return}
+  var n=Math.min(CUR.length,OTHER.length),runs=[],i=0;
+  while(i<n&&runs.length<300){
+    if(CUR[i]!==OTHER[i]){var s=i;while(i<n&&(CUR[i]!==OTHER[i]||(i+1<n&&CUR[i+1]!==OTHER[i+1])))i++;runs.push([s,i-s])}else i++;
+  }
+  $('res').textContent='Lengths: '+CUR.length+' vs '+OTHER.length+'\n'+runs.length+' changed spots (max 300)\n'+runs.map(function(r){return r[0].toString(16)+(r[0]>=PL.rows&&r[0]<PL.rows+PL.count*PL.width?' (row '+Math.floor((r[0]-PL.rows)/PL.width)+' +0x'+((r[0]-PL.rows)%PL.width).toString(16)+')':'')+' len '+r[1]+'\n  A: '+hx(CUR,r[0],Math.min(r[1],16))+'\n  B: '+hx(OTHER,r[0],Math.min(r[1],16))}).join('\n');
+}
+
+
+function parseDir(d){
+  var recs=[],o=0x20,cum=0;
+  while(o+16<=d.length){
+    var A=rd32(d,o),B=rd32(d,o+4),C=rd32(d,o+8),D=rd32(d,o+12);
+    if(D!==cum+A)break;
+    cum=D;recs.push({a:A,h:B,c:C,d:D,off:o});o+=16;
+  }
+  return {recs:recs,end:o,items:cum,declared:rd32(d,0x10)};
+}
+function dirView(){
+  if(!CUR){st('Load a ROS first');return}
+  var r=parseDir(CUR);
+  var t='Tables: '+r.recs.length+'  items: '+r.items+' (header says '+r.declared+')  directory ends at 0x'+r.end.toString(16)+'\n';
+  t+='#   hash      items  size   total  at\n';
+  r.recs.forEach(function(e,i){t+=(i+1)+'  '+('00000000'+e.h.toString(16)).slice(-8)+'  '+e.a+'  '+e.c+'  '+e.d+'  0x'+e.off.toString(16)+'\n'});
+  $('res').textContent=t;
+}
+
+var PL={ids:0xcb38,idRows:5000,rows:0x16778,width:509,count:3414};
+function plOK(){
+  if(!CUR||CUR.length<PL.rows+PL.width)return false;
+  return rd32(CUR,PL.ids)===0x20400000&&rd32(CUR,PL.ids+8)===0x20400001&&rd32(CUR,PL.ids+(PL.idRows-1)*8)===0x20401387;
+}
+function rowView(){
+  if(!CUR){st('Load a ROS first');return}
+  if(!plOK()){st('This file does not match the NBA2K20 layout (player ID table not found)');return}
+  var i=parseInt($('ridx').value)||0;i=Math.max(0,Math.min(i,PL.count-1));$('ridx').value=i;
+  var a=PL.rows+i*PL.width,t='Player row '+i+' of '+PL.count+' at 0x'+a.toString(16)+' ('+PL.width+' bytes)\n';
+  for(var o=0;o<PL.width;o+=16)t+=('000'+o.toString(16)).slice(-3)+'  '+hx(CUR,a+o,Math.min(16,PL.width-o))+' '+txt(CUR,a+o,Math.min(16,PL.width-o))+'\n';
+  $('res').textContent=t;
+}
+function rowStep(n){$('ridx').value=(parseInt($('ridx').value)||0)+n;rowView()}
+function rowPatch(){
+  if(!plOK()){st('Layout check failed');return}
+  var i=parseInt($('ridx').value)||0,o=parseInt($('roff').value,16),a=$('rval').value.replace(/[^0-9a-fA-F]/g,'');
+  if(isNaN(o)||o<0||o>=PL.width){st('Offset must be 0-1fc (hex)');return}
+  for(var k=0;k+1<a.length&&o+k/2<PL.width;k+=2)CUR[PL.rows+i*PL.width+o+k/2]=parseInt(a.substr(k,2),16);
+  st('Patched row '+i+' at +'+o.toString(16));rowView();
+}
+function rowCopy(){
+  if(!plOK()){st('Layout check failed');return}
+  var src=parseInt($('csrc').value),dst=parseInt($('cdst').value);
+  if(isNaN(src)||isNaN(dst)||src<0||dst<0||src>=PL.count||dst>=PL.count){st('Row numbers must be 0-'+(PL.count-1));return}
+  CUR.copyWithin(PL.rows+dst*PL.width,PL.rows+src*PL.width,PL.rows+(src+1)*PL.width);
+  st('Copied row '+src+' over row '+dst);
+}
+
+function jerseyList(){
+  if(!plOK()){st('Layout check failed');return}
+  var a=parseInt($('jfrom').value)||0,t='Row: jersey byte (decimal)\n';
+  for(var i=a;i<Math.min(a+60,PL.count);i++)t+=i+': '+CUR[PL.rows+i*PL.width+43]+(i%4==3?'\n':'   ');
+  $('res').textContent=t;
+}
+function jerseySet(){
+  if(!plOK()){st('Layout check failed');return}
+  var i=parseInt($('jrow').value),n=parseInt($('jnum').value);
+  if(isNaN(i)||isNaN(n)||i<0||i>=PL.count||n<0||n>99){st('Row 0-'+(PL.count-1)+', number 0-99');return}
+  CUR[PL.rows+i*PL.width+43]=n;st('Row '+i+' jersey byte set to '+n+' (experimental)');
+}
+
+var ROWBITS=4075;
+function rowBase(r){return PL.rows*8+r*ROWBITS}
+function getBits(d,p,w){var v=0;for(var i=0;i<w;i++){var q=p+i;v=v*2+((d[q>>3]>>(7-(q&7)))&1)}return v}
+function setBits(d,p,w,v){for(var i=w-1;i>=0;i--){var q=p+i,bit=v%2;v=Math.floor(v/2);var m=1<<(7-(q&7));if(bit)d[q>>3]|=m;else d[q>>3]&=~m}}
+function fld(r,p,w){return getBits(CUR,rowBase(r)+p,w)}
+function curRow(){var i=parseInt($('ridx').value)||0;return Math.max(0,Math.min(i,PL.count-1))}
+function rowView(){
+  if(!CUR){st('Load a ROS first');return}
+  if(!plOK()){st('This file does not match the NBA2K20 layout');return}
+  var r=curRow();$('ridx').value=r;
+  var t='Player row '+r+' of '+PL.count+(NAMES[r]?'  -  '+NAMES[r].first+' '+NAMES[r].last:'')+'\n';
+  t+='Jersey number: '+fld(r,333,7)+'\n';
+  t+='Position (raw 0-4): '+fld(r,488,3)+'\n';
+  t+='Contract length (raw): '+fld(r,1748,3)+'\n';
+  t+='First-name ref: '+(fld(r,32,32)-0x26000000)+'   Last-name ref: '+(fld(r,64,32)-0x26000000)+'  (offsets into the name pool)\n';
+  t+='Skill block, first 24 bytes (raw / 3 + 25 = likely rating):\n';
+  for(var k=0;k<24;k++){var raw=getBits(CUR,rowBase(r)+(394+4)*8+2+8*k,8);t+=raw+'('+(raw%3==0?(raw/3+25):'?')+') '}
+  $('res').textContent=t;
+}
+function rowStep(n){$('ridx').value=curRow()+n;rowView()}
+function jerseySet(){
+  if(!plOK()){st('Layout check failed');return}
+  var r=curRow(),n=parseInt($('jnum').value);
+  if(isNaN(n)||n<0||n>99){st('Jersey must be 0-99');return}
+  setBits(CUR,rowBase(r)+333,7,n);st('Row '+r+' jersey set to '+n);rowView();
+}
+function jerseyList(){
+  if(!plOK()){st('Layout check failed');return}
+  var a=parseInt($('jfrom').value)||0,t='Row: jersey\n';
+  for(var i=a;i<Math.min(a+60,PL.count);i++)t+=i+': '+fld(i,333,7)+(i%4==3?'\n':'   ');
+  $('res').textContent=t;
+}
+function bitGet(){
+  if(!plOK()){st('Layout check failed');return}
+  var r=curRow(),p=parseInt($('bpos').value),w=parseInt($('bw').value);
+  if(isNaN(p)||isNaN(w)||w<1||w>32||p<0||p+w>ROWBITS){st('Bit position 0-4074, width 1-32');return}
+  $('bval').value=fld(r,p,w);st('Row '+r+' bits '+p+'..'+(p+w-1)+' = '+fld(r,p,w));
+}
+function bitSet(){
+  if(!plOK()){st('Layout check failed');return}
+  var r=curRow(),p=parseInt($('bpos').value),w=parseInt($('bw').value),v=parseInt($('bval').value);
+  if(isNaN(p)||isNaN(w)||isNaN(v)||w<1||w>32||p<0||p+w>ROWBITS||v<0||v>=Math.pow(2,w)){st('Check position, width and value');return}
+  setBits(CUR,rowBase(r)+p,w,v);st('Wrote '+v+' to row '+r+' bits '+p+'..'+(p+w-1));
+}
+function rowCopy(){
+  if(!plOK()){st('Layout check failed');return}
+  var src=parseInt($('csrc').value),dst=parseInt($('cdst').value);
+  if(isNaN(src)||isNaN(dst)||src<0||dst<0||src>=PL.count||dst>=PL.count){st('Row numbers must be 0-'+(PL.count-1));return}
+  for(var p=0;p<ROWBITS;p+=16){var w=Math.min(16,ROWBITS-p);setBits(CUR,rowBase(dst)+p,w,getBits(CUR,rowBase(src)+p,w))}
+  st('Copied row '+src+' over row '+dst);
+}
+
+var NAMES=["Simmons|Ben", "Richardson|Josh", "Harris|Tobias", "Horford|Al", "Embiid|Joel", "Thybulle|Matisse", "Scott|Mike", "Robinson III|Glenn", "Burks|Alec", "Korkmaz|Furkan", "Milton|Shake", "O'Quinn|Kyle", "Neto|Raul", "Pelle|Norvel", "Smith|Zhaire", "Bledsoe|Eric", "Matthews|Wesley", "Middleton|Khris", "Antetokounmpo|Giannis", "Lopez|Brook", "DiVincenzo|Donte", "Ilyasova|Ersan", "Connaughton|Pat", "Korver|Kyle", "Hill|George", "Lopez|Robin", "Williams|Marvin", "Brown|Sterling", "Wilson|D.J.", "Antetokounmpo|Thanasis", "Satoransky|Tomas", "LaVine|Zach", "Hutchison|Chandler", "Young|Thaddeus", "Kornet|Luke", "White|Coby", "Gafford|Daniel", "Harrison|Shaquille", "Arcidiacono|Ryan", "Valentine|Denzel", "Felicio|Cristiano", "Porter|Otto", "Carter Jr.|Wendell", "Dunn|Kris", "Markkanen|Lauri", "Garland|Darius", "Sexton|Collin", "Osman|Cedi", "Love|Kevin", "Drummond|Andre", "Thompson|Tristan", "Porter Jr.|Kevin", "Nance Jr.|Larry", "Exum|Dante", "Dellavedova|Matthew", "McKinnie|Alfonzo", "Macura|J.P.", "Zizic|Ante", "Windler|Dylan", "Walker|Kemba", "Brown|Jaylen", "Hayward|Gordon", "Tatum|Jayson", "Theis|Daniel", "Kanter|Enes", "Smart|Marcus", "Wanamaker|Brad", "Edwards|Carsen", "Williams|Grant", "Ojeleye|Semi", "Green|Javonte", "Poirier|Vincent", "Langford|Romeo", "Williams|Robert", "Beverley|Patrick", "George|Paul", "Leonard|Kawhi", "Morris|Marcus", "Zubac|Ivica", "Williams|Louis", "Shamet|Landry", "Harrell|Montrezl", "Mann|Terance", "Green|JaMychal", "McGruder|Rodney", "Patterson|Patrick", "Kabengele|Mfiondu", "Motley|Johnathan", "Coffey|Amir", "Morant|Ja", "Brooks|Dillon", "Anderson|Kyle", "Jackson Jr.|Jaren", "Valanciunas|Jonas", "Clarke|Brandon", "Jones|Tyus", "Guduric|Marko", "Melton|De'Anthony", "Dieng|Gorgui", "Jackson|Josh", "Bell|Jordan", "Watanabe|Yuta", "Winslow|Justise", "Allen|Grayson", "Young|Trae", "Huerter|Kevin", "Hunter|De'Andre", "Collins|John", "Jones|Damian", "Fernando|Bruno", "Reddish|Cameron", "Teague|Jeff", "Graham|Treveon", "Bembry|DeAndre", "Dedmon|Dewayne", "Carter|Vince", "Goodwin|Brandon", "Capela|Clint", "Labissiere|Skal", "Nunn|Kendrick", "Butler|Jimmy", "Robinson|Duncan", "Olynyk|Kelly", "Adebayo|Bam", "Dragic|Goran", "Herro|Tyler", "Iguodala|Andre", "Jones Jr.|Derrick", "Silva|Chris", "Crowder|Jae", "Hill|Solomon", "Okpala|Kezie", "Haslem|Udonis", "Leonard|Meyers", "Rozier III|Terry", "Graham|Devonte", "Bridges|Miles", "Washington|P.J.", "Zeller|Cody", "Biyombo|Bismack", "Monk|Malik", "Bacon|Dwayne", "Batum|Nicolas", "Hernangomez|Willy", "Martin|Cody", "McDaniels|Jalen", "Martin|Caleb", "Simmons|Kobi", "Spalding|Ray", "Conley|Mike", "Mitchell|Donovan", "Ingles|Joe", "Bogdanovic|Bojan", "Gobert|Rudy", "O'Neale|Royce", "Clarkson|Jordan", "Davis|Ed", "Mudiay|Emmanuel", "Niang|Georges", "Bradley|Tony", "Tucker|Rayjon", "Williams-Goss|Nigel", "Oni|Miye", "Morgan|Juwan", "Fox|De'Aaron", "Bogdanovic|Bogdan", "Barnes|Harrison", "Bjelica|Nemanja", "Giles|Harry", "Holmes|Richaun", "Hield|Buddy", "Joseph|Cory", "Bazemore|Kent", "Len|Alex", "Ferrell|Yogi", "James|Justin", "Tolliver|Anthony", "Parker|Jabari", "Bagley III|Marvin", "Payton|Elfrid", "Barrett|R.J.", "Bullock|Reggie", "Randle|Julius", "Gibson|Taj", "Robinson|Mitchell", "Portis|Bobby", "Knox|Kevin", "Harkless|Maurice", "Ellington|Wayne", "Ntilikina|Frank", "Smith Jr.|Dennis", "Trier|Allonzo", "Dotson|Damyean", "Allen|Kadeem", "Bradley|Avery", "Green|Danny", "James|LeBron", "Davis|Anthony", "McGee|JaVale", "Kuzma|Kyle", "Rondo|Rajon", "Howard|Dwight", "Caldwell-Pope|Kentavious", "Caruso|Alex", "Cook|Quinn", "Daniels|Troy", "Dudley|Jared", "Horton-Tucker|Talen", "Cousins|DeMarcus", "Fultz|Markelle", "Fournier|Evan", "Gordon|Aaron", "Birch|Khem", "Vucevic|Nikola", "Ross|Terrence", "Ennis|James", "Iwundu|Wesley", "Bamba|Mohamed", "Carter-Williams|Michael", "Frazier|Melvin", "Clark|Gary", "Aminu|Al-Farouq", "Isaac|Jonathan", "Augustin|D.J.", "Brunson|Jalen", "Hardaway Jr.|Tim", "Finney-Smith|Dorian", "Kleber|Maxi", "Porzingis|Kristaps", "Wright|Delon", "Cauley-Stein|Willie", "Curry|Seth", "Barea|J.J.", "Jackson|Justin", "Lee|Courtney", "Marjanovic|Boban", "Broekhoff|Ryan", "Powell|Dwight", "Doncic|Luka", "Dinwiddie|Spencer", "LeVert|Caris", "Harris|Joe", "Prince|Taurean", "Allen|Jarrett", "Jordan|DeAndre", "Chandler|Wilson", "Temple|Garrett", "Kurucs|Rodions", "Musa|Dzanan", "Pinson|Theo", "Claxton|Nicolas", "Luwawu-Cabarrot|Timothe", "Durant|Kevin", "Irving|Kyrie", "Murray|Jamal", "Harris|Gary", "Barton|Will", "Millsap|Paul", "Jokic|Nikola", "Porter Jr.|Michael", "Craig|Torrey", "McRae|Jordan", "Morris|Monte", "Grant|Jerami", "Vonleh|Noah", "Bates-Diop|Keita", "Cancar|Vlatko", "Bol|Bol", "Plumlee|Mason", "Brogdon|Malcolm", "Oladipo|Victor", "Warren|T.J.", "Sabonis|Domantas", "Turner|Myles", "Lamb|Jeremy", "Holiday|Justin", "McConnell|T.J.", "Holiday|Aaron", "Bitadze|Goga", "McDermott|Doug", "Sumner|Edmond", "Leaf|T.J.", "Sampson|JaKarr", "Johnson|Alize", "Ball|Lonzo", "Holiday|Jrue", "Ingram|Brandon", "Williamson|Zion", "Favors|Derrick", "Redick|J.J.", "Hayes|Jaxson", "Hart|Josh", "Melli|Nicolo", "Okafor|Jahlil", "Jackson|Frank", "Moore|E'Twaun", "Alexander-Walker|Nickeil", "Miller|Darius", "Williams|Kenrich", "Rose|Derrick", "Mykhailiuk|Sviatoslav", "Snell|Tony", "Doumbouya|Sekou", "Maker|Thon", "Brown|Bruce", "Jackson|Reggie", "Morris|Markieff", "Galloway|Langston", "Henson|John", "Knight|Brandon", "Wood|Christian", "Thomas|Khyri", "Kennard|Luke", "Griffin|Blake", "Lowry|Kyle", "VanVleet|Fred", "Anunoby|OG", "Siakam|Pascal", "Ibaka|Serge", "Powell|Norman", "Hollis-Jefferson|Rondae", "Davis|Terence", "Boucher|Chris", "McCaw|Patrick", "Thomas|Matt", "Johnson|Stanley", "Miller|Malcolm", "Brissett|Oshae", "Gasol|Marc", "Westbrook|Russell", "Harden|James", "Gordon|Eric", "Covington|Robert", "Tucker|P.J.", "House|Danuel", "McLemore|Ben", "Rivers|Austin", "Chandler|Tyson", "Sefolosha|Thabo", "Hartenstein|Isaiah", "Clemons|Chris", "Frazier|Michael", "Howard|William", "Caboclo|Bruno", "Murray|Dejounte", "Forbes|Bryn", "DeRozan|DeMar", "Lyles|Trey", "Aldridge|LaMarcus", "White|Derrick", "Gay|Rudy", "Walker IV|Lonnie", "Poeltl|Jakob", "Mills|Patrick", "Belinelli|Marco", "Carroll|DeMarre", "Metu|Chimezie", "Johnson|Keldon", "Samanic|Luka", "Rubio|Ricky", "Booker|Devin", "Bridges|Mikal", "Oubre Jr.|Kelly", "Ayton|Deandre", "Saric|Dario", "Diallo|Cheick", "Carter|Jevon", "Johnson|Cameron", "Jerome|Ty", "Okobo|Elie", "Lecque|Jalen", "Owens|Tariq", "Baynes|Aron", "Kaminsky|Frank", "Paul|Chris", "Gilgeous-Alexander|Shai", "Dort|Luguentz", "Gallinari|Danilo", "Adams|Steven", "Diallo|Hamidou", "Schroder|Dennis", "Noel|Nerlens", "Muscala|Mike", "Ferguson|Terrance", "Bazley|Darius", "Burton|Deonte", "Nader|Abdel", "Roby|Isaiah", "Roberson|Andre", "Russell|D'Angelo", "Beasley|Malik", "Okogie|Josh", "Hernangomez|Juan", "Towns|Karl-Anthony", "Crabbe|Allen", "Turner|Evan", "Culver|Jarrett", "Johnson|James", "Spellman|Omari", "Nowell|Jaylen", "Vanderbilt|Jarred", "Evans III|Jacob", "Reid|Naz", "Layman|Jake", "Lillard|Damian", "McCollum|C.J.", "Ariza|Trevor", "Anthony|Carmelo", "Whiteside|Hassan", "Little|Nassir", "Hezonja|Mario", "Simons|Anfernee", "Swanigan|Caleb", "Trent Jr.|Gary", "Gabriel|Wenyen", "Hoard|Jaylen", "Nurkic|Jusuf", "Collins|Zach", "Hood|Rodney", "Bowman|Ky", "Lee|Damion", "Wiggins|Andrew", "Green|Draymond", "Chriss|Marquese", "Paschall|Eric", "Poole|Jordan", "Looney|Kevon", "Smailagic|Alen", "Thompson|Klay", "Curry|Stephen", "Pargo|Jeremy", "Toscano|Juan", "Norvell Jr.|Zach", "Smith|Ish", "Beal|Bradley", "Bonga|Isaac", "Hachimura|Rui", "Mahinmi|Ian", "Wagner|Moritz", "Napier|Shabazz", "Bertans|Davis", "Brown Jr.|Troy", "Payton II|Gary", "Robinson|Jerome", "Schofield|Admiral", "Williams|Johnathan", "Wall|John", "Bryant|Thomas", "Mathews|Garrison", "Pasecniks|Anzejs", "Brown|Moses", "Martin|Kelan", "McLaughlin|Jordan", "Hervey|Kevin", "Harper|Jared", "Eubanks|Drew", "Weatherspoon|Quinndary", "Watson|Paul", "Hernandez|Dewan", "Bowen II|Brian", "Mitrou-Long|Naz", "Dozier|P.J.", "Gray|Josh", "Cheatham|Zylan", "Bone|Jordan", "King|Louis", "Cleveland|Antonius", "Reaves|Josh", "Brazdeikis|Ignas", "Antetokounmpo|Kostas", "Cacok|Devontae", "Wooten|Kenny", "Brantley|Jarrell", "Wright-Foreman|Justin", "Vincent|Gabe", "Alexander|Kyle", "Mason III|Frank", "Reynolds|Cameron", "Konchar|John", "Shayok|Marial", "Mokoka|Adam", "Strus|Max", "Newman|Malik", "Wade|Dean", "Mooney|Matt", "Waters|Tremont", "Fall|Tacko", "Brown Jr.|Charles", "Guy|Kyle", "Jeffries|DaQuan", "Johnson|B.J.", "Law|Vic", "Martin|Jeremiah", "Chiozza|Chris", "Johnson|Tyler", "Bender|Dragan", "Walton Jr.|Derrick", "Kidd-Gilchrist|Michael", "Bolden|Marques", "Green|Gerald", "Bolden|Jonah", "Waiters|Dion", "Parsons|Chandler", "Frazier|Tim", "Jefferson|Amile", "Mika|Eric", "Nenê|", "Burke|Trey", "Thomas|Isaiah", "Cook|Tyler", "Patton|Justin", "Franks|Robert", "Anderson|Justin", "Magette|Josh", "Ponds|Shamorie", "Randolph|Levi", "Rabb|Ivan", "Miles|C.J.", "Macon|Daryl", "Nwaba|David", "Ellenson|Henry", "Robinson|Justin", "Green|Jeff", "Wallace|Tyrone", "Hall|Devon", "Shumpert|Iman", "Kidd|Stanton", "Anderson|Ryan", "Gasol|Pau", "Lydon|Tyler", "Plumlee|Miles", "Welsh|Thomas", "Payne|Cameron", "Moreland|Eric", "Jones|Jemerrio", "Harrison|Andrew", "Thornwell|Sindarius", "Martin|Jarell", "Edwards|Vince", "Blakeney|Antonio", "Duval|Trevon", "Davis|Deyonta", "Loyd|Jordan", "Maten|Yante", "Grantham|Donte", "Phillip|Tarik", "Washburn|Julian", "Colson|Bonzie", "Adams|Jaylen", "Smith|J.R.", "Livingston|Shaun", "Yabusele|Guerschon", "Leuer|Jon", "Williams|Troy", "Udoh|Ekpe", "Cavanaugh|Tyler", "Mack|Shelvin", "Chealey|Joe", "Williams|Alan", "Mejri|Salah", "Harris|Devin", "King|George", "Faried|Kenneth", "Lin|Jeremy", "Meeks|Jodie", "Pachulia|Zaza", "Whitehead|Isaiah", "Lucas|Kalin", "Reed|Davon", "Bluiett|Trevon", "Derrickson|Marcus", "Terrell|Jared", "Simmons|Jonathon", "Robinson|Devin", "Monroe|Greg", "Highsmith|Haywood", "Lemon Jr.|Walter", "Sampson|Brandon", "Alkins|Rawle", "Adel|Deng", "Hunter|R.J.", "Delgado|Angel", "Evans|Jawun", "Deng|Luol", "Bayless|Jerryd", "Bertans|Dairis", "Stephenson|Lance", "Williams|C.J.", "Hicks|Isaiah", "Thomas|Lance", "Bogut|Andrew", "Mirotic|Nikola", "Johnson|Amir", "Fredette|Jimmer", "Cunningham|Dante", "Collison|Darren", "Grant|Jerian", "Jenkins|John", "Garrett|Billy", "Brewer|Corey", "Koufos|Kosta", "Selden Jr.|Wayne", "Caupain|Troy", "Poythress|Alex", "Stauskas|Nik", "Frye|Channing", "Blossomgame|Jaron", "Gibson|Jonathan", "Dorsey|Tyler", "Humphries|Isaac", "Evans|Tyreke", "Calderon|Jose", "Pondexter|Quincy", "Motiejunas|Donatas", "Crawford|Jamal", "Felton|Raymond", "Jerebko|Jonas", "Dekker|Sam", "Randle|Chasson", "Noah|Joakim", "Clark|Ian", "Zeller|Tyler", "Bibbs|Justin", "Creek|Mitchell", "Hannahs|Dusty", "Briscoe|Isaiah", "Mbah a Moute|Luc", "Johnson|Wesley", "Demps|Cody", "Machado|Scott", "Smith|Jason", "Ingram|Andre", "Jones|Terrence", "McCall|Tahjere", "Sibert|Jordan", "Terry|Emanuel", "Canaan|Isaiah", "Solomon|Richard", "Abrines|Alex", "Hamilton|Daniel", "Anigbogu|Ike", "Casspi|Omri", "Randolph|Zach", "Baldwin|Wade", "Beasley|Michael", "Gortat|Marcin", "Teodosic|Milos", "Richardson|Malachi", "Hicks|Stephan", "Acy|Quincy", "Nunnally|James", "Evans|Keenan", "Lofton|Zach", "Jones|Jalen", "Morris|Jaylen", "Brooks|Marshon", "Brown|Lorenzo", "Baker|Ron", "Jackson|Demetrius", "Stephens|D.J.", "Young|Nick", "Davis|Tyler", "Ulis|Tyler", "White|Okaro", "Qi|Zhou", "Akoon-Purcell|DeVaughn", "Preston|Billy", "Holland|John", "Asik|Omer", "Nash|Le'Bryan", "Thornton|Marcus", "Young|Mike", "Griffin|Eric", "Ouattara|Yakuba", "Wade|Dwyane", "Parker|Tony", "Mozgov|Timofey", "Nowitzki|Dirk", "Splitter|Tiago", "Varejao|Anderson", "Barbosa|Leandro", "Montero|Luis", "Jefferson|Richard", "Collison|Nick", "Brooks|Aaron", "Barnes|Matt", "Hibbert|Roy", "Dunleavy|Mike", "Novak|Steve", "Thornton|Marcus", "Williams|Reggie", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Wang|Mike", "Peete|Dion", "Timmerman|Zach", "Schroeder|Tim", "Boenisch|Erick", "Jones|Brad", "Brough|John", "Townsend|Brian", "Park|Steve", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "****************|****************", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Harper|Justin", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "James|Mike", "Victor|Ada", "Victor|Ada", "Kilpatrick|Sean", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Lewis|Rashard", "Marion|Shawn", "Martin|Kenyon", "Maxiell|Jason", "Mbah a Moute|Luc", "McGee|JaVale", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Nash|Steve", "Oden|Greg", "O'Neal|Jermaine", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Powell|Josh", "Victor|Ada", "Victor|Ada", "Richardson|Jason", "Ridnour|Luke", "Osman|Cedi", "Mickey|Jordan", "Victor|Ada", "Harrison|Andrew", "Thornton|Marcus", "Johnson|Dakari", "Mohammed|Nazr", "Brand|Elton", "Victor|Ada", "Stoudemire|Amar'e", "Butler|Caron", "Victor|Ada", "Kaman|Chris", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Hollins|Ryan", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Brooks|Marshon", "Victor|Ada", "Smith|Greg", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Victor|Ada", "Kirilenko|Andrei", "Abdul-Jabbar|Kareem", "Robinson|David", "Unseld|Wes", "Gilmore|Artis", "Russell|Bill", "Mikan|George", "Cowens|Dave", "McAdoo|Bob", "Duncan|Tim", "O'Neal|Shaquille", "Olajuwon|Hakeem", "Chamberlain|Wilt", "Wallace|Ben", "Walton|Bill", "Ewing|Patrick", "Yao|Ming", "Mourning|Alonzo", "Webber|Chris", "Pettit|Bob", "McHale|Kevin", "Rodman|Dennis", "Malone|Karl", "Barry|Rick", "Gervin|George", "Baylor|Elgin", "Pierce|Paul", "Erving|Julius", "Bird|Larry", "Havlicek|John", "Pippen|Scottie", "Wilkins|Dominique", "Worthy|James", "Jordan|Michael", "Maravich|Pete", "Bryant|Kobe", "Iverson|Allen", "Allen|Ray", "Drexler|Clyde", "Cousy|Bob", "Johnson|Magic", "West|Jerry", "Frazier|Walt", "Thomas|Isiah", "Payton|Gary", "Stockton|John", "Hardaway|Tim", "Webb|Spud", "Garnett|Kevin", "McGrady|Tracy", "Ji|Chen", "Li|Wei", "Geng|Qian", "Zhi|Qiao", "Xing|Sun", "Yu|Gu", "Yujia|Hu", "Houdong|Tang", "Ming|Pan", "Sanders|Dominique", "Meng|Xia", "White|Steve", "Nelson|Ham", "Han|Qi", "Chun|Tang", "Zhi|Peng", "Xue|Yang", "Yang|Gu", "Qiang|Chen", "Hui|Wang", "Lei|Song", "Morris|Jonathan", "Chai|Zhang", "Wen|Sun", "Blair|Ron", "Yu|Chen", "Ji|Zhou", "Dong|Zheng", "Cooper|Scott", "Bao|Wang", "Yong|Zhao", "Qiang|Li", "Shuang|Wu", "Kai|Jiang", "Que|Guo", "Cheng|Yang", "Young|Marcus", "Tatum|Paul", "Calderon|Magic", "Grace|Lou", "Trigg|Connor", "Gonzalez|Kiki", "Smith|Phil", "Thomas|Jason", "Randolph|Scooter", "Daniels|Bryson", "Madison|Bailey", "Ronnie|Jackie", "Ellis|Jackson", "Bishop|Ben", "Middleton|Sheldon", "Smith|Gina", "Schrader|Jeff", "Zdyrko|Dave", "Goodwin|Happy", "Gaines|Hakeem", "Cori|Shane", "Peter|Myers", "Dustin|Mike", "White|Andy", "Park|David", "Qi|Han", "Ducey|Benny", "Roberts|Zane", "Evans|Doug", "Splitter|Pooh", "Starks|Anthony", "Day|K.J.", "Benjamin|David", "Keefe|Will", "Barton|Clifford", "Kenny|Cratty", "Poeltl|Jakob", "Bertans|Davis", "Belinelli|Marco", "White|Derrick", "Rondo|Rajon", "Caldwell-Pope|Kentavious", "Smith|James", "Williams|Robert", "Smith|James", "Davis|Michael", "Williams|Robert", "Johnson|Richard", "Smith|James", "Smith|James", "Jones|William", "Smith|James", "Williams|Robert", "Smith|James", "Williams|Robert", "Davis|Michael", "Davis|Michael", "Jones|William", "Victor|Ada", "Brown|John", "Miller|David", "Brown|John", "Geiger|Matt", "Jones|K.C.", "Bogues|Muggsy", "Willis|Kevin", "Brown|Dee", "Stoudamire|Damon", "Smith|Steve", "Schrempf|Detlef", "LaFrentz|Raef", "Van Exel|Nick", "Najera|Eduardo", "Cassell|Sam", "Sprewell|Latrell", "Hughes|Larry", "Snow|Eric", "Hudson|Lou", "Monroe|Earl", "Johnson|Dennis", "Jones|Eddie", "Aguirre|Mark", "Dandridge|Bob", "Collins|Doug", "McGinnis|George", "Pressey|Paul", "Daugherty|Brad", "Free|World B.", "Heinsohn|Tom", "Sanders|Tom", "Cummings|Terry", "Lucas|Jerry", "Larusso|Rudy", "Abdul-Rauf|Mahmoud", "Debusschere|Dave", "Porter|Terry", "Laettner|Christian", "Floyd|Sleepy", "Wingate|David", "Jackson|Jaren", "Bibby|Mike", "Unseld|Wes", "McCray|Rodney", "Thompson|Billy", "Gill|Kendall", "Anderson|Nick", "Harper|Derek", "Marshall|Donyell", "Robinson|Cliff", "Bowie|Anthony", "Anderson|Kenny", "Scott|Dennis", "Price|Mark", "Best|Travis", "Salley|John", "Hammonds|Tom", "Barry|Jon", "Vincent|Sam", "Rogers|Rodney", "Boswell|Fabian", "Parish|Robert", "Gervin|George", "Kersey|Jerome", "Havlicek|John", "Cheeks|Maurice", "Iverson|Allen", "Erving|Julius", "Cunningham|Billy", "Chamberlain|Wilt", "Simmons|Ben", "Iguodala|Andre", "Hawkins|Hersey", "McGinnis|George", "Collins|Doug", "Embiid|Joel", "Dawkins|Darryl", "Holiday|Jrue", "Bibby|Henry", "McKie|Aaron", "Robertson|Oscar", "Moncrief|Sidney", "Allen|Ray", "Antetokounmpo|Giannis", "Abdul-Jabbar|Kareem", "Dandridge|Bob", "Redd|Michael", "Baker|Vin", "Pressey|Paul", "Pierce|Ricky", "McGlocklin|Jon", "Cummings|Terry", "Bogut|Andrew", "Lanier|Bob", "Rose|Derrick", "Jordan|Michael", "Pippen|Scottie", "Rodman|Dennis", "Gilmore|Artis", "Butler|Jimmy", "Sloan|Jerry", "Love|Bob", "Noah|Joakim", "Deng|Luol", "Armstrong|B.J.", "Kukoc|Toni", "Grant|Horace", "Oakley|Charles", "Kerr|Steve", "Price|Mark", "Irving|Kyrie", "James|LeBron", "Daugherty|Brad", "Ilgauskas|Zydrunas", "Love|Kevin", "Nance|Larry", "Harper|Ron", "Free|World B.", "Russell|Campy", "Varejao|Anderson", "Carr|Austin", "Brandon|Terrell", "Ehlo|Craig", "Hill|Tyrone", "Cousy|Bob", "Havlicek|John", "Pierce|Paul", "Bird|Larry", "Russell|Bill", "McHale|Kevin", "Cowens|Dave", "Parish|Robert", "Garnett|Kevin", "Rondo|Rajon", "Allen|Ray", "Heinsohn|Tom", "Thomas|Isaiah", "Walker|Antoine", "Jones|Sam", "Paul|Chris", "Maggette|Corey", "McAdoo|Bob", "Griffin|Blake", "Jordan|DeAndre", "Free|World B.", "Kaman|Chris", "Redick|J.J.", "Williams|Louis", "Harper|Ron", "Gordon|Eric", "Walton|Bill", "Bledsoe|Eric", "Miles|Darius", "Manning|Danny", "Conley|Mike", "Gay|Rudy", "Abdur-Rahim|Shareef", "Gasol|Pau", "Gasol|Marc", "Randolph|Zach", "Battier|Shane", "Bibby|Mike", "Williams|Jason", "Posey|James", "Anthony|Greg", "Wells|Bonzi", "Scott|Byron", "Hudson|Lou", "Korver|Kyle", "Wilkins|Dominique", "Pettit|Bob", "Mutombo|Dikembe", "Willis|Kevin", "Smith|Steve", "Maravich|Pete", "Millsap|Paul", "Rivers|Doc", "Horford|Al", "Teague|Jeff", "Augmon|Stacey", "Webb|Spud", "Hardaway|Tim", "Wade|Dwyane", "James|LeBron", "Mourning|Alonzo", "O'Neal|Shaquille", "Rice|Glen", "Seikaly|Rony", "Whiteside|Hassan", "Jones|Eddie", "Brown|P.J.", "Smith|Steve", "Dragic|Goran", "Haslem|Udonis", "Majerle|Dan", "Walker|Kemba", "Jones|Eddie", "Rice|Glen", "Johnson|Larry", "Mourning|Alonzo", "Wallace|Gerald", "Curry|Dell", "Bogues|Muggsy", "Gill|Kendall", "Davis|Baron", "Coleman|Derrick", "Brown|P.J.", "Jackson|Stephen", "Wesley|David", "Stockton|John", "Maravich|Pete", "Dantley|Adrian", "Malone|Karl", "Eaton|Mark", "Kirilenko|Andrei", "Gobert|Rudy", "Hayward|Gordon", "Griffith|Darrell", "Mitchell|Donovan", "Hornacek|Jeff", "Millsap|Paul", "Favors|Derrick", "Robertson|Oscar", "Richmond|Mitch", "Stojakovic|Peja", "Webber|Chris", "Lucas|Jerry", "Cousins|DeMarcus", "Bibby|Mike", "Divac|Vlade", "Martin|Kevin", "Theus|Reggie", "Williams|Jason", "Evans|Tyreke", "Christie|Doug", "Archibald|Nate", "Frazier|Walt", "Houston|Allan", "Anthony|Carmelo", "Debusschere|Dave", "Ewing|Patrick", "King|Bernard", "Oakley|Charles", "Richardson|Micheal Ray", "Stoudemire|Amar'e", "Porzingis|Kristaps", "Starks|John", "Monroe|Earl", "Jackson|Mark", "Barnett|Dick", "Johnson|Magic", "West|Jerry", "Bryant|Kobe", "Abdul-Jabbar|Kareem", "O'Neal|Shaquille", "Baylor|Elgin", "Worthy|James", "Mikan|George", "Chamberlain|Wilt", "Gasol|Pau", "Goodrich|Gail", "Wilkes|Jamaal", "Scott|Byron", "Cooper|Michael", "Fisher|Derek", "Hardaway|Penny", "McGrady|Tracy", "Hill|Grant", "Howard|Dwight", "O'Neal|Shaquille", "Anderson|Nick", "Lewis|Rashard", "Scott|Dennis", "Francis|Steve", "Armstrong|Darrell", "Vucevic|Nikola", "Grant|Horace", "Shaw|Brian", "Gordon|Aaron", "Harper|Derek", "Blackman|Rolando", "Aguirre|Mark", "Nowitzki|Dirk", "Bradley|Shawn", "Finley|Michael", "Mashburn|Jamal", "Nash|Steve", "Kidd|Jason", "Doncic|Luka", "Chandler|Tyson", "Haywood|Brendan", "Jackson|Jim", "Barea|J.J.", "Kidd|Jason", "Petrovic|Drazen", "Erving|Julius", "Williams|Buck", "Lopez|Brook", "Carter|Vince", "Jefferson|Richard", "Coleman|Derrick", "Martin|Kenyon", "Russell|D'Angelo", "Harris|Devin", "Anderson|Kenny", "Gill|Kendall", "Van Horn|Keith", "Lever|Fat", "Thompson|David", "English|Alex", "Anthony|Carmelo", "Issel|Dan", "Jokic|Nikola", "Iverson|Allen", "Mutombo|Dikembe", "Vandeweghe|Kiki", "McDyess|Antonio", "Van Exel|Nick", "Billups|Chauncey", "Abdul-Rauf|Mahmoud", "Ellis|Laphonso", "Jackson|Mark", "Oladipo|Victor", "George|Paul", "O'Neal|Jermaine", "Smits|Rik", "McGinnis|George", "Person|Chuck", "Hibbert|Roy", "Rose|Jalen", "Williams|Herb", "Schrempf|Detlef", "Stephenson|Lance", "Davis|Antonio", "Paul|Chris", "Davis|Baron", "Holiday|Jrue", "Mashburn|Jamal", "Davis|Anthony", "Cousins|DeMarcus", "Wesley|David", "Randle|Julius", "Chandler|Tyson", "Stojakovic|Peja", "Anderson|Ryan", "Gordon|Eric", "Evans|Tyreke", "Smith|J.R.", "Thomas|Isiah", "Dumars|Joe", "Hill|Grant", "Wallace|Ben", "Lanier|Bob", "Billups|Chauncey", "Stackhouse|Jerry", "Hamilton|Richard", "Debusschere|Dave", "Griffin|Blake", "Bing|Dave", "Rodman|Dennis", "Laimbeer|Bill", "Drummond|Andre", "Mahorn|Rick", "Lowry|Kyle", "DeRozan|DeMar", "Carter|Vince", "Leonard|Kawhi", "Valanciunas|Jonas", "Siakam|Pascal", "VanVleet|Fred", "Davis|Antonio", "Stoudamire|Damon", "McGrady|Tracy", "Peterson|Morris", "Christie|Doug", "Ibaka|Serge", "Calderon|Jose", "Harden|James", "McGrady|Tracy", "Drexler|Clyde", "Olajuwon|Hakeem", "Yao|Ming", "Murphy|Calvin", "Sampson|Ralph", "Paul|Chris", "Hayes|Elvin", "Smith|Kenny", "Thorpe|Otis", "Maxwell|Vernon", "Mobley|Cuttino", "Francis|Steve", "Beverley|Patrick", "Parker|Tony", "Gervin|George", "Leonard|Kawhi", "Duncan|Tim", "Robinson|David", "Elliott|Sean", "Aldridge|LaMarcus", "Bowen|Bruce", "Gilmore|Artis", "Johnson|Avery", "Green|Danny", "Horry|Robert", "Rodman|Dennis", "Del Negro|Vinny", "Nash|Steve", "Westphal|Paul", "Marion|Shawn", "Chambers|Tom", "Stoudemire|Amar'e", "Hornacek|Jeff", "Kidd|Jason", "Johnson|Kevin", "Booker|Devin", "Nance|Larry", "Majerle|Dan", "Dragic|Goran", "Ceballos|Cedric", "Johnson|Dennis", "Payton|Gary", "Westbrook|Russell", "Allen|Ray", "Durant|Kevin", "Kemp|Shawn", "Johnson|Dennis", "Sikma|Jack", "George|Paul", "Lewis|Rashard", "McDaniel|Xavier", "Schrempf|Detlef", "Wilkens|Lenny", "Harden|James", "Haywood|Spencer", "Ibaka|Serge", "Cassell|Sam", "Wiggins|Andrew", "Szczerbiak|Wally", "Love|Kevin", "Garnett|Kevin", "Towns|Karl-Anthony", "Butler|Jimmy", "Marbury|Stephon", "Rubio|Ricky", "Brandon|Terrell", "Rider|Isaiah", "Laettner|Christian", "Hassell|Trenton", "Sprewell|Latrell", "Lillard|Damian", "Drexler|Clyde", "Kersey|Jerome", "Aldridge|LaMarcus", "Walton|Bill", "Sabonis|Arvydas", "Porter|Terry", "McCollum|C.J.", "Randolph|Zach", "Strickland|Rod", "Vandeweghe|Kiki", "Rider|Isaiah", "Batum|Nicolas", "Matthews|Wesley", "Duckworth|Kevin", "Curry|Stephen", "Thompson|Klay", "Mullin|Chris", "Barry|Rick", "Chamberlain|Wilt", "Durant|Kevin", "Thurmond|Nate", "Hardaway|Tim", "Davis|Baron", "Green|Draymond", "Richmond|Mitch", "Iguodala|Andre", "Richardson|Jason", "Floyd|Sleepy", "Wall|John", "Arenas|Gilbert", "Butler|Caron", "Hayes|Elvin", "Unseld|Wes", "Monroe|Earl", "King|Bernard", "Jamison|Antawn", "Chenier|Phil", "Beal|Bradley", "Webber|Chris", "Hughes|Larry", "Strickland|Rod", "Malone|Jeff", "Johnson|Dennis", "Ainge|Danny", "Bird|Larry", "McHale|Kevin", "Parish|Robert", "Walton|Bill", "Sichting|Jerry", "Wedman|Scott", "Vincent|Sam", "Smith|Hart", "Williams|Robert", "Jones|Luke", "Paxson|John", "Jordan|Michael", "Pippen|Scottie", "Grant|Horace", "Cartwright|Bill", "Armstrong|B.J.", "Perdue|Will", "Levingston|Cliff", "Hodges|Craig", "Williams|Scott", "Johnson|Sam", "Davis|Michael", "Armstrong|B.J.", "Jordan|Michael", "Pippen|Scottie", "Grant|Horace", "Cartwright|Bill", "Williams|Scott", "Paxson|John", "McCray|Rodney", "Perdue|Will", "Nealy|Ed", "Smith|James", "Davis|Michael", "Snow|Eric", "Iverson|Allen", "Lynch|George", "Hill|Tyrone", "Mutombo|Dikembe", "McKie|Aaron", "Jones|Jumaine", "Geiger|Matt", "MacCulloch|Todd", "Johnson|Richard", "Miller|David", "Brown|John", "Johnson|Magic", "Scott|Byron", "Worthy|James", "Green|A.C.", "Abdul-Jabbar|Kareem", "Thompson|Mychal", "Cooper|Michael", "Rambis|Kurt", "Thompson|Billy", "Brickowski|Frank", "Cowper|John", "Blake|Richard", "Smith|Kenny", "Maxwell|Vernon", "Horry|Robert", "Thorpe|Otis", "Olajuwon|Hakeem", "Elie|Mario", "Cassell|Sam", "Brooks|Scott", "Bullard|Matt", "Cotton|John", "Jones|William", "Davis|Michael", "Billups|Chauncey", "Hamilton|Richard", "Williamson|Corliss", "Milicic|Darko", "Wallace|Ben", "Hunter|Lindsey", "Campbell|Elden", "Ham|Darvin", "Williams|Robert", "Jones|John", "Cedric|Susanna", "Brown|Blithe", "Ward|Charlie", "Houston|Allan", "Sprewell|Latrell", "Johnson|Larry", "Ewing|Patrick", "Williams|Herb", "Wingate|David", "Dudley|Chris", "Camby|Marcus", "Brown|John", "Handson|Richard", "Smith|Zac", "Snow|Eric", "Hughes|Larry", "James|LeBron", "Varejao|Anderson", "Ilgauskas|Zydrunas", "Gibson|Daniel", "Marshall|Donyell", "Wesley|David", "Pollard|Scot", "Jones|Damon", "Brown|John", "Brown|Steven", "Stoudamire|Damon", "Smith|Steve", "Pippen|Scottie", "Schrempf|Detlef", "Sabonis|Arvydas", "Grant|Brian", "Anthony|Greg", "Augmon|Stacey", "O'Neal|Jermaine", "Wells|Bonzi", "Brown|Steve", "Cedric|Susanna", "Nash|Steve", "Richardson|Quentin", "Lennon|Juliana", "Marion|Shawn", "Stoudemire|Amar'e", "Jackson|Jim", "Barbosa|Leandro", "Hunter|Steven", "Outlaw|Bo", "Smith|John", "Mike|Star", "Smith|Mark", "Fisher|Derek", "Bryant|Kobe", "Fox|Rick", "Grant|Horace", "O'Neal|Shaquille", "Horry|Robert", "Shaw|Brian", "Madsen|Mark", "Harper|Ron", "Lue|Tyronn", "George|Devean", "Rider|Isaiah", "Payton|Gary", "Bryant|Kobe", "Fox|Rick", "Malone|Karl", "O'Neal|Shaquille", "Grant|Horace", "George|Devean", "Russell|Bryon", "Fisher|Derek", "Walton|Luke", "Davis|Michael", "Starks|David", "Bibby|Mike", "Christie|Doug", "Stojakovic|Peja", "Webber|Chris", "Divac|Vlade", "Jackson|Bobby", "Pollard|Scot", "Brown|Chucky", "Wallace|Gerald", "Stark|John", "Johnson|Frane", "Tatoo|William", "Parker|Tony", "Drick|Camilla", "Bowen|Bruce", "Horry|Robert", "Duncan|Tim", "Barry|Brent", "Basil|Shelley", "Davis|Michael", "Miller|Jeff", "Smith|Byron", "Williams|Robert", "Brown|John", "Werner|Virginia", "Wade|Dwyane", "James|LeBron", "Haslem|Udonis", "Fabian|Boswell", "Allen|Ray", "Lionel|William", "Alfred|Ronald", "Battier|Shane", "McDonald|Steven", "Ian|Cissie", "Hemingway|Haley", "Werner|Virginia", "Wade|Dwyane", "James|LeBron", "Battier|Shane", "Haslem|Udonis", "Fabian|Boswell", "Lionel|William", "Alfred|Ronald", "Hemingway|Haley", "Lewis|Rashard", "Jones|Sam", "Brown|John", "Rondo|Rajon", "Allen|Ray", "Pierce|Paul", "Garnett|Kevin", "Powe|Leon", "Cassell|Sam", "Howar|Tout", "Brown|P.J.", "Scalabrine|Brian", "Pollard|Scot", "Posey|James", "Cedric|Susanna", "Curry|Stephen", "Thompson|Klay", "Barnes|Harrison", "Green|Draymond", "Bogut|Andrew", "Iguodala|Andre", "Livingston|Shaun", "Chasel|Scott", "Barbosa|Leandro", "Verne|Spenser", "Tiffany|Whit", "Varejao|Anderson", "Irving|Kyrie", "Smith|J.R.", "James|LeBron", "Love|Kevin", "Mozgov|Timofey", "Thompson|Tristan", "Dellavedova|Matthew", "Shumpert|Iman", "Jefferson|Richard", "Frye|Channing", "Hemingway|Haley", "Brwon|Jack", "Jackson|Reggie", "Caldwell-Pope|Kentavious", "Morris|Marcus", "Harris|Tobias", "Drummond|Andre", "Baynes|Aron", "Bullock|Reggie", "Harrington|Ulysses", "Raleign|Archer", "Ian|Cissie", "Pigou|Curitis", "Johnson|Stanley", "Russell|D'Angelo", "Clarkson|Jordan", "Bryant|Kobe", "Randle|Julius", "Hibbert|Roy", "Young|Nick", "Nance Jr.|Larry", "Cronin|Dennis", "Clare|Alfred", "Pitman|Bruce", "Theodore|Morgan", "Gilbert|Hogan", "Hill|George", "Cornell|Fanny", "George|Paul", "Turner|Myles", "Mahinmi|Ian", "Curme|Ed", "Chapman|Kelsen", "Russell|Benedict", "Wheeler|Tyrone", "Marsh|Bach", "Robinson III|Glenn", "Hill|Solomon", "Conley|Mike", "Jeremy|Jenny", "Barnes|Matt", "Randolph|Zach", "McDonald|Steven", "Werner|Virginia", "Carter|Vince", "Green|JaMychal", "Stephenson|Lance", "Martin|Jarell", "Shaw|Arlen", "Arlen|Wesley", "Lowry|Kyle", "DeRozan|DeMar", "Johnson|James", "Clarissa|Walter", "Valanciunas|Jonas", "Joseph|Cory", "Ross|Terrence", "Biyombo|Bismack", "Patterson|Patrick", "Wright|Delon", "Lawrence|Doherty", "Caboclo|Bruno", "Mack|Shelvin", "Hood|Rodney", "Hayward|Gordon", "Favors|Derrick", "Gobert|Rudy", "Burke|Trey", "Lyles|Trey", "Oswald|Maggie", "Neto|Raul", "Hamiltion|Crane", "Ingles|Joe", "Babbitt|Horace", "Irving|Kyrie", "Smith|J.R.", "James|LeBron", "Love|Kevin", "Thompson|Tristan", "Jefferson|Richard", "Shumpert|Iman", "Dunleavy|Mike", "Frye|Channing", "McDonald|Steven", "Hemingway|Haley", "McRae|Jordan", "Curry|Stephen", "Thompson|Klay", "Durant|Kevin", "Green|Draymond", "Pachulia|Zaza", "Iguodala|Andre", "Augustine|Hugh", "Livingston|Shaun", "McCaw|Patrick", "McGee|JaVale", "Varejao|Anderson", "Clark|Ian", "Irving|Kyrie", "Smith|J.R.", "James|LeBron", "Love|Kevin", "Varejao|Anderson", "Mozgov|Timofey", "Thompson|Tristan", "Shumpert|Iman", "Lionel|William", "Marion|Shawn", "Dellavedova|Matthew", "Hemingway|Haley", "Tabu|Zac", "Bryant|Kobe", "Johnson|Wesley", "Boozer|Carlos", "Curme|Ed", "Lin|Jeremy", "Clarkson|Jordan", "Pitman|Bruce", "Davis|Ed", "Young|Nick", "Theodore|Morgan", "Randle|Julius", "Hill|George", "Russell|Benedict", "George|Paul", "Augustine|Hugh", "Hibbert|Roy", "Jesse|Moll", "Clarissa|Walter", "Miles|C.J.", "Hill|Solomon", "Rhys|Oliver", "Jerome|Cash", "Bess|Mortimer", "Collison|Darren", "McLemore|Ben", "Gay|Rudy", "Henrietta|Payne", "Cousins|DeMarcus", "Shaw|Arlen", "Landry|Carl", "Stauskas|Nik", "Carl|Violet", "Bright|King", "Casspi|Omri", "Moore|Hart", "LaVine|Zach", "Martin|Kevin", "Wiggins|Andrew", "Young|Thaddeus", "Dieng|Gorgui", "Rubio|Ricky", "Spencer|Upton", "Turiaf|Ronny", "Wilde|Ralap", "Godfery|Occam", "Robinson III|Glenn", "Thodore|Lester", "Parker|Tony", "Green|Danny", "Leonard|Kawhi", "Duncan|Tim", "Splitter|Tiago", "Wilson|Philip", "Rob|Peter", "Drick|Camilla", "Mills|Patrick", "Joseph|Cory", "Hughes|Wright", "Baynes|Aron", "Napier|Shabazz", "Wade|Dwyane", "Deng|Luol", "Gene|Bryan", "Fabian|Boswell", "Whiteside|Hassan", "Werner|Virginia", "McDonald|Steven", "Alfred|Ronald", "Haslem|Udonis", "Tony|Moll", "Ferguson|Darnell", "Bradley|Avery", "Thornton|Marcus", "Bray|Rodney", "Sean|Mark", "Thoreau|Lou", "Zeller|Tyler", "Turner|Evan", "Crowder|Jae", "Smart|Marcus", "Wallace|Gerald", "William|Don", "Bernie|Browning", "Curry|Stephen", "Thompson|Klay", "Iguodala|Andre", "Scott|Smollett", "Bogut|Andrew", "Barnes|Harrison", "Green|Draymond", "Tiffany|Whit", "Livingston|Shaun", "Barbosa|Leandro", "Verne|Spenser", "Holiday|Justin", "Chapman|Kelsen", "Sidney|Carter", "Chandler|Wilson", "Faried|Kenneth", "Mozgov|Timofey", "Alvin|Richardson", "Gallinari|Danilo", "Nurkic|Jusuf", "Gresham|Montague", "Harris|Gary", "Horatio|Richard", "Yerkes|Elijah", "Beverley|Patrick", "Harden|James", "Ariza|Trevor", "Richard|Jones", "Howard|Dwight", "Alcott|Atwood", "Gallup|Ternence", "Brewer|Corey", "Kennedy|Gale", "Willie|Hood", "Yonng|Primo", "Canaan|Isaiah", "Macy|Kyle", "Jordan|Michael", "Gervin|George", "Green|Sidney", "Oakley|Charles", "Corzine|Dave", "Paxson|John", "Higgins|Rod", "Brown|John", "Sam|Richard", "Miller|Crish", "Williams|Robert", "Paxson|John", "Jordan|Michael", "Pippen|Scottie", "Grant|Horace", "Cartwright|Bill", "Vincent|Sam", "Sellers|Brad", "Hodges|Craig", "Corzine|Dave", "Davis|Charles", "Perdue|Will", "Jones|David", "Harper|Ron", "Jordan|Michael", "Pippen|Scottie", "Rodman|Dennis", "Longley|Luc", "Kukoc|Toni", "Kerr|Steve", "Wennington|Bill", "Buechler|Jud", "Simpkins|Dickey", "Verne|James", "Williams|Robert", "Harper|Derek", "Starks|John", "Smith|Charles", "Oakley|Charles", "Ewing|Patrick", "Davis|Hubert", "Bonner|Anthony", "Anthony|Greg", "Williams|Monty", "Williams|Herb", "Christie|Doug", "Smith|Rock", "Hill|George", "Stephenson|Lance", "George|Paul", "Augustine|Hugh", "Hibbert|Roy", "Ellen|Tim", "Clarissa|Walter", "Mahinmi|Ian", "Turner|Evan", "Wheeler|Tyrone", "Hill|Solomon", "Davis|Michael", "Stockton|John", "Hornacek|Jeff", "Keefe|Adam", "Malone|Karl", "Foster|Greg", "Ostertag|Greg", "Anderson|Shandon", "Eisley|Howard", "Carr|Antoine", "Russell|Bryon", "Davis|Michael", "Williams|Robert", "Thomas|Isiah", "Dumars|Joe", "Aguirre|Mark", "Mahorn|Rick", "Laimbeer|Bill", "Rodman|Dennis", "Johnson|Vinnie", "Edwards|James", "Salley|John", "Dawkins|Darryl", "Smith|Cissie", "Williams|Robert", "Thomas|Isiah", "Dumars|Joe", "Aguirre|Mark", "Rodman|Dennis", "Laimbeer|Bill", "Mahorn|Rick", "Johnson|Vinnie", "Edwards|James", "Salley|John", "Dawkins|Darryl", "Smith|James", "Williams|Robert", "Price|Mark", "Kerr|Steve", "Ehlo|Craig", "Nance|Larry", "Daugherty|Brad", "Williams|Reggie", "Rollins|Tree", "Mokeski|Paul", "Smith|Larry", "Lucky|William", "Brown|Chucky", "Brown|Nick", "Porter|Terry", "Drexler|Clyde", "Kersey|Jerome", "Williams|Buck", "Duckworth|Kevin", "Jones|Michael", "Ainge|Danny", "Bryant|Mark", "Petrovic|Drazen", "Jones|William", "Davis|Michael", "Brown|John", "Johnson|Avery", "Elie|Mario", "Elliott|Sean", "Robinson|David", "Duncan|Tim", "Del Negro|Vinny", "Jackson|Jaren", "Kerr|Steve", "Person|Chuck", "Perdue|Will", "Williams|Monty", "Davis|Michael", "Paxson|John", "Jordan|Michael", "Pippen|Scottie", "Grant|Horace", "Cartwright|Bill", "Armstrong|B.J.", "Perdue|Will", "Levingston|Cliff", "Hodges|Craig", "Williams|Scott", "Johnson|Richard", "Davis|Michael", "Williams|Alvin", "Carter|Vince", "Peterson|Morris", "Oakley|Charles", "Davis|Antonio", "Christie|Doug", "Willis|Kevin", "Curry|Dell", "Brown|Dee", "Bogues|Muggsy", "Cedric|Susanna", "Smith|John", "Armstrong|B.J.", "Jordan|Michael", "Pippen|Scottie", "Kukoc|Toni", "Perdue|Will", "Longley|Luc", "Kerr|Steve", "Wennington|Bill", "Simpkins|Dickey", "Buechler|Jud", "Salley|John", "Edwards|James", "Price|Mark", "Harper|Ron", "Ehlo|Craig", "Nance|Larry", "Daugherty|Brad", "Williams|Reggie", "Rollins|Tree", "Mokeski|Paul", "Darren|Reade", "Parker|William", "Brown|Chucky", "Brown|Kennedy", "Hughes|Larry", "Szczerbiak|Wally", "James|LeBron", "Wallace|Ben", "Ilgauskas|Zydrunas", "Varejao|Anderson", "Gibson|Daniel", "Marshall|Donyell", "Wesley|David", "Pollard|Scot", "Jones|Damon", "Brown|Steven", "Berg|Goldsmith", "Strickland|Rod", "Szczerbiak|Wally", "Garnett|Kevin", "Madsen|Mark", "Gill|Kendall", "Hassell|Trenton", "Sprewell|Latrell", "Trent|Gary", "Johnson|Ervin", "Smith|John", "Hoiberg|Fred", "Harrington|Ulysses", "Iverson|Allen", "Anthony|Carmelo", "Nenê|", "Camby|Marcus", "Smith|J.R.", "Najera|Eduardo", "Howar|Tout", "Hunter|Steven", "Davis|Michael", "Brown|John", "Smith|William", "Willie|Hood", "Carter|Vince", "Marion|Shawn", "Nowitzki|Dirk", "Arlen|Wesley", "Chapman|Quintion", "Stojakovic|Peja", "Haywood|Brendan", "Mahinmi|Ian", "Brewer|Corey", "Butler|Caron", "Miller|David", "Westbrook|Russell", "Sefolosha|Thabo", "Durant|Kevin", "Collison|Nick", "Ibaka|Serge", "Martin|Kevin", "Tyrone|May", "Jackson|Reggie", "Fisher|Derek", "Cook|Daequan", "James|David", "Williams|Robert", "Paul|Chris", "Jackson|Calvin", "Mason|Desmond", "Augustine|Hugh", "Chandler|Tyson", "Jackson|Bobby", "McDonald|Steven", "Davis|Michael", "Miller|Gray", "Smith|Walkley", "Williams|Robert", "Stojakovic|Peja", "Armstrong|Darrell", "Hardaway|Penny", "Anderson|Nick", "Outlaw|Bo", "Grant|Horace", "Royal|Donald", "Scott|Dennis", "Shaw|Brian", "Bowie|Anthony", "Turner|Jeff", "Harper|John", "Smith|Peter", "Billups|Chauncey", "Hamilton|Richard", "Bray|Rodney", "Milicic|Darko", "Wallace|Ben", "McDyess|Antonio", "Hunter|Lindsey", "Campbell|Elden", "Ham|Darvin", "Williamson|Corliss", "Williams|Robert", "Cedric|Susanna", "Fisher|Derek", "Bryant|Kobe", "Rice|Glen", "Green|A.C.", "O'Neal|Shaquille", "Fox|Rick", "Grant|Horace", "Horry|Robert", "Shaw|Brian", "Madsen|Mark", "Harper|Ron", "George|Devean", "Harper|Ron", "Bryant|Kobe", "Rice|Glen", "Green|A.C.", "O'Neal|Shaquille", "Fox|Rick", "Grant|Horace", "Fisher|Derek", "Horry|Robert", "Shaw|Brian", "Madsen|Mark", "Salley|John", "Fisher|Derek", "Bryant|Kobe", "Horry|Robert", "Grant|Horace", "O'Neal|Shaquille", "George|Devean", "Madsen|Mark", "Pargo|Jannero", "Russell|Bryon", "Walton|Luke", "Davis|Michael", "Miller|David", "Snow|Eric", "Iverson|Allen", "Lynch|George", "Ratliff|Theo", "Geiger|Matt", "Hill|Tyrone", "McKie|Aaron", "Jones|Jumaine", "MacCulloch|Todd", "Johnson|Will", "Green|David", "Edward|John", "Irving|Kyrie", "Yerkes|Elijah", "Miles|C.J.", "Varejao|Anderson", "Thompson|Tristan", "Zeller|Tyler", "Gibson|Daniel", "Rhys|Oliver", "Dellavedova|Matthew", "Walton|Luke", "Harris|Joe", "Haywood|Brendan", "Bibby|Mike", "Lennon|Juliana", "Richard|Jones", "Williams|Marvin", "Horford|Al", "Pachulia|Zaza", "Christopher|Edison", "Dick|Quinn", "Law|Acie", "Merlin|Cronin", "Williams|Robert", "Brown|John", "Lambert|Boyle", "Leavell|Allen", "McCray|Rodney", "Sampson|Ralph", "Olajuwon|Hakeem", "Reid|Robert", "Regan|Wilhelmina", "Ehlo|Craig", "Gerald|Turner", "Waiters|Granville", "Williams|Robert", "Brown|Harper", "Jackson|Mark", "Wilkins|Gerald", "McDaniel|Xavier", "Oakley|Charles", "Ewing|Patrick", "Starks|John", "Anthony|Greg", "Ogden|Arabella", "Beck|Kelvin", "Arthur|James", "Bellamy|John", "Smith|John", "Wade|Dwyane", "Allen|Ray", "James|LeBron", "Lewis|Rashard", "Fabian|Boswell", "Werner|Virginia", "Haslem|Udonis", "Battier|Shane", "Beasley|Michael", "Aries|Lawrence", "McDonald|Steven", "Alfred|Ronald", "Parker|Tony", "Green|Danny", "Leonard|Kawhi", "Duncan|Tim", "Wilson|Philip", "Splitter|Tiago", "Rob|Peter", "Drick|Camilla", "Mills|Patrick", "Hughes|Wright", "Anderson|Kyle", "Belinelli|Marco", "Parker|Tony", "Green|Danny", "Leonard|Kawhi", "Duncan|Tim", "Splitter|Tiago", "Rob|Peter", "Drick|Camilla", "Mills|Patrick", "Hughes|Wright", "Anderson|Kyle", "Belinelli|Marco", "Ezekiel|Borg", "Harper|Derek", "Starks|John", "Smith|Charles", "Oakley|Charles", "Ewing|Patrick", "Davis|Hubert", "Bonner|Anthony", "Beck|Kelvin", "Anthony|Greg", "Williams|Monty", "Williams|Herb", "Christie|Doug", "Rivers|Doc", "Starks|John", "Smith|Charles", "Oakley|Charles", "Ewing|Patrick", "Davis|Hubert", "Beck|Kelvin", "Anthony|Greg", "Williams|Herb", "Christie|Doug", "Blackman|Rolando", "Brown|Sam", "Billups|Chauncey", "Hamilton|Richard", "Bray|Rodney", "Milicic|Darko", "McDyess|Antonio", "Ratliff|Theo", "Hunter|Lindsey", "Campbell|Elden", "Cedric|Susanna", "Maxiell|Jason", "Russell|Benedict", "Sidney|Carter", "Keith|Pollitt", "Calderon|Jose", "Rose|Jalen", "Fabian|Boswell", "Davis|Antonio", "Wilson|Philip", "Peterson|Morris", "Church|Augus", "Doyle|Geoffrey", "Morrison|Jeff", "Brown|John", "Sam|Jared", "Kidd|Jason", "Jefferson|Richard", "Van Horn|Keith", "Martin|Kenyon", "MacCulloch|Todd", "Kittles|Kerry", "Eric|Ted", "Leif|Daniell", "John|Jared", "Collins|Jason", "Williams|Aaron", "Williams|Robert", "Kidd|Jason", "Jefferson|Richard", "Rogers|Rodney", "Martin|Kenyon", "Williams|Aaron", "Kittles|Kerry", "Collins|Jason", "Mutombo|Dikembe", "Leif|Daniell", "Eric|Ted", "Scalabrine|Brian", "Cowper|Christ", "Collison|Darren", "Dunleavy|Mike", "George|Paul", "Granger|Danny", "Hibbert|Roy", "Dodd|Aldrich", "Gene|Bryan", "Posey|James", "Valentine|Benson", "Verne|Spenser", "Flynn|Tracy", "Dick|Quinn", "Collison|Darren", "George|Paul", "Granger|Danny", "Augustine|Hugh", "Hibbert|Roy", "Hill|George", "Valentine|Benson", "Flynn|Tracy", "Stephenson|Lance", "Dodd|Aldrich", "Billy|Kirk", "Barbosa|Leandro", "Johnson|Kevin", "Majerle|Dan", "Chambers|Tom", "Waltz|Stephen", "Miller|Oliver", "Ainge|Danny", "Shelley|Basil", "Dumas|Richard", "West|Mark", "Williams|Robert", "Brown|Boswell", "Smith|John", "Harper|Archibald", "Johnson|Magic", "Worthy|James", "Green|A.C.", "Divac|Vlade", "Perkins|Sam", "Campbell|Elden", "Monroe|Alan", "Scott|Byron", "Thompson|Mychal", "Drew|Larry", "Rod|James", "Jackson|Mark", "cooper|Ronnie", "Rose|Jalen", "Tout|Howar", "Smits|Rik", "Perkins|Sam", "Best|Travis", "Mullin|Chris", "McKey|Derrick", "Croshere|Austin", "Brown|John", "Parker|Richard", "Workman|Haywoode", "cooper|Ronnie", "Tout|Howar", "Davis|Antonio", "Smits|Rik", "Scott|Byron", "McKey|Derrick", "Mitchell|Sam", "Susanna|Rock", "Thompson|LaSalle", "Fanny|Cornell", "Boswell|John", "Thomas|Isiah", "Dumars|Joe", "Dantley|Adrian", "Mahorn|Rick", "Laimbeer|Bill", "Rodman|Dennis", "Johnson|Vinnie", "Edwards|James", "Salley|John", "Dawkins|Darryl", "Williams|Robert", "Brown|John", "Kidd|Jason", "Felton|Raymond", "Smith|J.R.", "Jerome|Cash", "Chandler|Tyson", "Anthony|Carmelo", "Novak|Steve", "Shumpert|Iman", "Carter|Sidney", "Davis|Baron", "Aries|Lawrence", "Jeffries|Jared", "Irving|Kyrie", "Miles|C.J.", "Trollpoe|Vito", "Thompson|Tristan", "Joule|Gary", "Zeller|Tyler", "Varejao|Anderson", "Alan|Monroe", "Godfery|Occam", "Dellavedova|Matthew", "Harris|Joe", "Waiters|Dion", "Wall|John", "Cash|Malachi", "Sherwood|Mandel", "George|Larry", "McGee|JaVale", "Bunyan|Bill", "Carpenter|Kent", "Yi|Jianlian", "Crofts|Marvin", "Morse|Michael", "Williams|Robert", "Byron|John", "Lin|Jeremy", "Harden|James", "Parsons|Chandler", "Kennedy|Gale", "Asik|Omer", "Smith|Greg", "Bentham|Bennett", "Beverley|Patrick", "Malthus|Neil", "Alcott|Atwood", "Joe|Sandy", "Williams|Robert", "Alston|Joule", "Carter|Vince", "Marion|Shawn", "Nowitzki|Dirk", "Arlen|Wesley", "Hart|Moore", "Harris|Devin", "Mark|Glenn", "Ellington|Wayne", "Crowder|Jae", "Brewer|Corey", "Miller|David", "Teague|Jeff", "Korver|Kyle", "Carroll|DeMarre", "Millsap|Paul", "Horford|Al", "Mack|Shelvin", "Williams|Louis", "Wagner|Roy", "Judith|Eli", "Scott|Mike", "Brand|Elton", "Schroder|Dennis", "Lillard|Damian", "Batum|Nicolas", "Matthews|Wesley", "Aldridge|LaMarcus", "Lopez|Robin", "Bryce|Hubery", "Webster|Leo", "Aldridge|Giles", "Penn|Norman", "Tyler|Ryan", "Williams|Robert", "Brown|Hugh", "Rondo|Rajon", "Allen|Ray", "Pierce|Paul", "Garnett|Kevin", "Shaw|Arlen", "Virginia|Werner", "Rock|Sweet", "Moore|E'Twaun", "Hamlet|Clare", "Cissie|Ian", "Kelsen|Chapman", "Burton|Richards", "Fisher|Derek", "Bryant|Kobe", "Chapman|Quintion", "Gasol|Pau", "Charley|Yehudi", "Hansen|Lionel", "Turiaf|Ronny", "Gabriel|Bernie", "Walton|Luke", "Joule|Gary", "Ariza|Trevor", "Smith|John", "Adelaide|Christopher", "Redick|J.J.", "Lee|Courtney", "Lewis|Rashard", "Howard|Dwight", "Alvin|Richardson", "Hamlet|Clare", "Turkoglu|Hedo", "Gortat|Marcin", "Lue|Tyronn", "Jack|William", "Peter|John", "Fisher|Derek", "Bryant|Kobe", "Ariza|Trevor", "Gasol|Pau", "Joule|Gary", "Chapman|Quintion", "Walton|Luke", "Gabriel|Bernie", "Hansen|Lionel", "Powell|Josh", "Woolf|Derrick", "Charley|Yehudi", "Laurie|Cliff", "Walton|Luke", "Bryant|Kobe", "Chapman|Quintion", "Phil|Anne", "Gabriel|Bernie", "Hansen|Lionel", "Turiaf|Ronny", "Joule|Gary", "Bunyan|Bill", "McKie|Aaron", "Charley|Yehudi", "Laurie|Cliff", "Hansen|Lionel", "Bryant|Kobe", "Chapman|Quintion", "Dobbin|Wade", "Cook|Brian", "George|Devean", "Robeson|Blair", "Walton|Luke", "Turiaf|Ronny", "Joule|Gary", "Jackson|Jim", "Parker|Tony", "Bowen|Bruce", "Jackson|Stephen", "Robinson|David", "Duncan|Tim", "Drick|Camilla", "Chasel|Scott", "Claxton|Speedy", "Kerr|Steve", "Willis|Kevin", "Jackson|Calvin", "Brown|Reynolds", "Parker|Tony", "Bowen|Bruce", "Horry|Robert", "Turkoglu|Hedo", "Duncan|Tim", "Drick|Camilla", "Bird|Luther", "Jackson|Calvin", "Ward|Charlie", "Godfery|Occam", "Violet|John", "Smith|Pitman", "Parker|Tony", "Bowen|Bruce", "Finley|Michael", "Horry|Robert", "Duncan|Tim", "Drick|Camilla", "Zero|Jerry", "Barry|Brent", "Wilson|Philip", "Morrison|Jeff", "Nigel|Buckle", "Smith|John", "Johnson|Dennis", "Ainge|Danny", "Bird|Larry", "McHale|Kevin", "Parish|Robert", "Walton|Bill", "Sichting|Jerry", "Wedman|Scott", "Vincent|Sam", "Turner|Andre", "Roberts|Fred", "Jones|Steve", "Stockton|John", "Davy|Frank", "Nora|Justin", "Malone|Karl", "Barry|Cowper", "Russell|Bryon", "Hornacek|Jeff", "Keefe|Adam", "Carr|Antoine", "Alerander|Blake", "Foster|Greg", "Ostertag|Greg", "Harper|Ron", "Jordan|Michael", "Pippen|Scottie", "Rodman|Dennis", "Wennington|Bill", "Kukoc|Toni", "Kerr|Steve", "Edwards|James", "Buechler|Jud", "Salley|John", "Simpkins|Dickey", "Perdue|Will", "Dumars|Joe", "Houston|Allan", "Hill|Grant", "Mill|Chad", "Thorpe|Otis", "Moll|Jesse", "Mills|Terry", "Ratliff|Theo", "Hunter|Lindsey", "West|Mark", "Curry|Michael", "Madge|John", "Rider|Isaiah", "Ricardo|Troy", "Gugliotta|Tom", "Garnett|Kevin", "Laettner|Christian", "Porter|Terry", "Hutt|Alex", "Mitchell|Sam", "Robinson|Phil", "Webb|Spud", "Brown|Keith", "Smith|John", "York|Dennis", "Newman|Johnny", "Kent|George", "Baker|Vin", "Turiaf|Ronny", "Cummings|Terry", "Joule|Gary", "Arthur|John", "Smith|Eric", "Conlon|Marty", "Reynolds|Jerry", "Lister|Alton", "Hardaway|Penny", "Scott|Dennis", "Bowie|Anthony", "Koncak|Jon", "O'Neal|Shaquille", "Royal|Donald", "Spender|Terry", "Theis|Mark", "Shaw|Brian", "Bonner|Anthony", "Armstrong|Darrell", "Ted|John", "Payton|Gary", "Hawkins|Hersey", "Schrempf|Detlef", "Kemp|Shawn", "Johnson|Ervin", "Perkins|Sam", "Askew|Vincent", "Brickowski|Frank", "Wingate|David", "Snow|Eric", "Williams|Robert", "Brown|May", "Smith|Kenny", "Maxwell|Vernon", "Horry|Robert", "Thorpe|Otis", "Olajuwon|Hakeem", "Elie|Mario", "Cassell|Sam", "Brooks|Scott", "Bullard|Matt", "Lawrence|Veme", "Jones|William", "Davis|Michael", "Neil|Mike", "Augmon|Stacey", "Wilkins|Dominique", "Willis|Kevin", "Koncak|Jon", "Ehlo|Craig", "Keefe|Adam", "Neto|Raul", "Allen|Grayson", "Niang|Georges", "Smith|John", "Swift|John", "Payton|Gary", "Gill|Kendall", "Schrempf|Detlef", "Kemp|Shawn", "Cage|Michael", "Askew|Vincent", "Perkins|Sam", "Pierce|Ricky", "McMillan|Nate", "Johnson|Ervin", "Smith|Ted", "Dave|John", "Stockton|John", "Hornacek|Jeff", "Davy|Frank", "Malone|Karl", "Barry|Cowper", "Chambers|Tom", "Alerander|Blake", "Russell|Bryon", "Crotty|John", "Williams|Robert", "Brown|Ted", "Camilla|John", "Kidd|Jason", "Stevenson|DeShawn", "Marion|Shawn", "Nowitzki|Dirk", "Chandler|Tyson", "Willie|Hood", "Stojakovic|Peja", "Haywood|Brendan", "Barea|J.J.", "Butler|Caron", "Burton|Richards", "Mahinmi|Ian", "Miller|Andre", "Matthews|Wesley", "Wallace|Gerald", "Aldridge|LaMarcus", "Camby|Marcus", "Hill|Mike", "Spencer|Churchill", "Batum|Nicolas", "Cunningham|Dante", "Leo|Bartholomew", "Williams|Robert", "John|Brown", "Fisher|Derek", "Bryant|Kobe", "Allen|Peter", "Gasol|Pau", "Joule|Gary", "Chapman|Quintion", "Walton|Luke", "Barnes|Matt", "Hansen|Lionel", "Abel|Madge", "Woolf|Derrick", "Charley|Yehudi", "Westbrook|Russell", "Sefolosha|Thabo", "Durant|Kevin", "Ibaka|Serge", "Ward|Babbitt", "Collison|Nick", "Cook|Daequan", "Harden|James", "Malan|Solomon", "Mohammed|Nazr", "Griff|David", "Williams|Robert", "Werner|Virginia", "Wade|Dwyane", "James|LeBron", "Fabian|Boswell", "Ian|Cissie", "Haslem|Udonis", "Lionel|William", "Young|Tyson", "Hardy|Dunn", "Bibby|Mike", "Ilgauskas|Zydrunas", "Smith|Sander", "Armstrong|B.J.", "Jordan|Michael", "Pippen|Scottie", "Kukoc|Toni", "Longley|Luc", "Perdue|Will", "Kerr|Steve", "Wennington|Bill", "Harper|Ron", "Buechler|Jud", "Blount|Corie", "Smith|John", "Hardaway|Penny", "Anderson|Nick", "Royal|Donald", "Grant|Horace", "O'Neal|Shaquille", "Scott|Dennis", "Shaw|Brian", "Rollins|Tree", "Thompson|Tony", "Turner|Jeff", "Bowie|Anthony", "John|Brown", "Chapman|Kelsen", "Felton|Raymond", "Gallinari|Danilo", "Martin|Kenyon", "Nenê|", "Chandler|Wilson", "Smith|J.R.", "Harrington|Al", "Robeson|Blair", "Jackson|Calvin", "Brown|Sam", "Smith|Dave", "Conley|Mike", "Glenn|Mark", "Howar|Tout", "Randolph|Zach", "Gasol|Marc", "Hunter|Congreve", "Battier|Shane", "Edward|Ford", "Powe|Leon", "Whyet|Edwin", "Newton|Abbott", "Sam|John", "Westbrook|Russell", "Sefolosha|Thabo", "Durant|Kevin", "Ibaka|Serge", "Ward|Babbitt", "Collison|Nick", "Cook|Daequan", "Harden|James", "Fisher|Derek", "Mohammed|Nazr", "Tyrone|May", "Williams|Robert", "Kidd|Jason", "Willie|Hood", "Marion|Shawn", "Nowitzki|Dirk", "Haywood|Brendan", "Carter|Vince", "Mahinmi|Ian", "Arlen|Wesley", "Joe|Sandy", "Chapman|Quintion", "Hansen|Lionel", "Jackson|Calvin", "Moore|Hart", "Bryant|Kobe", "Allen|Peter", "Gasol|Pau", "Joule|Gary", "Chapman|Quintion", "Allen|Peter", "Barnes|Matt", "Hansen|Lionel", "Abel|Madge", "Woolf|Derrick", "Gene|Bryan", "Jones|Joel", "Xia|Min", "Martinez|Leo", "Schmeltz|Gunnar", "Jackson|Kibo", "George|SF"].map(function(x){var p=x.split('|');return {last:p[0],first:p[1]}});
+var TEAMS=['76ers','Bucks','Bulls','Cavaliers','Celtics','Clippers','Grizzlies','Hawks','Heat','Hornets','Jazz','Kings','Knicks','Lakers','Magic','Mavericks','Nets','Nuggets','Pacers','Pelicans','Pistons','Raptors','Rockets','Spurs','Suns','Thunder','Timberwolves','Trail Blazers','Warriors','Wizards'];
+var ABBR={PHI:0,MIL:1,CHI:2,CLE:3,BOS:4,LAC:5,MEM:6,ATL:7,MIA:8,CHA:9,UTAH:10,UTA:10,SAC:11,NY:12,NYK:12,LAL:13,ORL:14,DAL:15,BKN:16,BK:16,BRK:16,DEN:17,IND:18,NO:19,NOP:19,NOR:19,DET:20,TOR:21,HOU:22,SA:23,SAS:23,PHX:24,PHO:24,OKC:25,MIN:26,POR:27,GS:28,GSW:28,WSH:29,WAS:29};
+function normName(s){
+  s=s.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[.'`’\-,]/g,' ');
+  var t=s.split(/\s+/).filter(function(w){return w&&['jr','sr','ii','iii','iv','v'].indexOf(w)<0});
+  return t.join(' ');
+}
+var NIDX=null;
+function buildIdx(){
+  if(NIDX)return;NIDX={};
+  for(var r=0;r<NAMES.length;r++){var k=normName(NAMES[r].first+' '+NAMES[r].last);if(!k)continue;(NIDX[k]=NIDX[k]||[]).push(r)}
+}
+function rowTeam(r){return fld(r,224,32)}
+function pickRow(rows){
+  for(var i=0;i<rows.length;i++){var t=rowTeam(rows[i]);if(t>=0x21400000&&t<0x2140001e)return rows[i]}
+  for(var j=0;j<rows.length;j++){if(rowTeam(rows[j])===0)return rows[j]}
+  return -1;
+}
+var PLAN=null;
+function finishPreview(cur,miss,source){
+  var plan={moves:[],jers:[],unmatched:[],seen:{}};
+  cur.forEach(function(p){
+    var rows=NIDX[normName(p.name)];
+    if(!rows){plan.unmatched.push(p.name+' ('+TEAMS[p.team]+')');return}
+    var r=pickRow(rows);if(r<0){plan.unmatched.push(p.name+' ('+TEAMS[p.team]+')');return}plan.seen[r]=1;
+    var t=0x21400000+p.team;
+    if(rowTeam(r)!==t||fld(r,2610,32)!==t)plan.moves.push([r,t,p.name]);
+    var j=parseInt(p.jersey);if(!isNaN(j)&&j>=0&&j<=99&&fld(r,333,7)!==j)plan.jers.push([r,j,p.name]);
+  });
+  plan.release=[];
+  for(var r=0;r<PL.count;r++){var t=rowTeam(r);if(t>=0x21400000&&t<0x2140001e&&!plan.seen[r])plan.release.push(r)}
+  PLAN=plan;
+  var o='Source: '+source+'\nCurrent NBA players read: '+cur.length+'\nMatched to a 2K20 row: '+(cur.length-plan.unmatched.length)+'\nNot in the 2K20 roster (rookies/new): '+plan.unmatched.length+'\n';
+  o+='\nTeam changes: '+plan.moves.length+'\nJersey changes: '+plan.jers.length+'\n2K20 players no longer on an NBA roster: '+plan.release.length+'\n';
+  o+='\nSample team changes:\n'+plan.moves.slice(0,25).map(function(m){return m[2]+' -> '+TEAMS[m[1]-0x21400000]}).join('\n');
+  o+='\n\nNot matched (first 40):\n'+plan.unmatched.slice(0,40).join('\n');
+  if(miss.length)o+='\n\nSkipped: '+miss.slice(0,30).join(', ');
+  $('res').textContent=o;$('applybtn').disabled=false;
+  st('Preview ready: '+plan.moves.length+' team changes, '+plan.jers.length+' jersey changes. Now press Apply changes.','ok');
+}
+async function previewUpdate(){
+  if(!CUR||!plOK()){st('Load the NBA2K20 ROS first');return}
+  buildIdx();st('Fetching current NBA rosters from ESPN...');
+  try{
+    var base='https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams';
+    var tl=(await (await fetch(base)).json()).sports[0].leagues[0].teams.map(function(x){return x.team});
+    var cur=[],miss=[];
+    for(var i=0;i<tl.length;i++){
+      st('Team '+(i+1)+'/'+tl.length+' '+tl[i].abbreviation);
+      var ti=ABBR[tl[i].abbreviation];if(ti===undefined){miss.push('team '+tl[i].abbreviation);continue}
+      var r=await (await fetch(base+'/'+tl[i].id+'/roster')).json();
+      (r.athletes||[]).forEach(function(a){cur.push({name:a.displayName,team:ti,jersey:a.jersey})});
+    }
+    finishPreview(cur,miss,'ESPN (live)');
+  }catch(e){$('applybtn').disabled=true;st('Could not fetch the current rosters ('+e.message+'). This page may be blocked from the internet because it was opened from a file manager. Use the paste box below instead, or open the page in Chrome.','bad')}
+}
+function resolveTeam(t){
+  t=String(t||'').trim();if(!t)return -1;
+  var u=t.toUpperCase();if(ABBR[u]!==undefined)return ABBR[u];
+  var l=t.toLowerCase();
+  if(l.indexOf('blazers')>=0)return 27;
+  for(var i=0;i<TEAMS.length;i++){if(l.indexOf(TEAMS[i].toLowerCase())>=0)return i}
+  return -1;
+}
+function parseRosterText(text){
+  var cur=[],miss=[];text=String(text||'').trim();
+  if(!text)return {cur:cur,miss:['(empty)']};
+  if(text.charAt(0)=='['||text.charAt(0)=='{'){
+    var arr=JSON.parse(text);if(!Array.isArray(arr))arr=arr.players||arr.athletes||[];
+    arr.forEach(function(o){
+      var nm=o.name||o.displayName||o.player,tm=resolveTeam(o.team||o.teamAbbr||o.abbreviation),jr=(o.num!==undefined?o.num:(o.jersey!==undefined?o.jersey:o.number));
+      if(!nm)return;if(tm<0){miss.push(nm+' (team?)');return}cur.push({name:nm,team:tm,jersey:jr});
+    });
+    return {cur:cur,miss:miss};
+  }
+  var lines=text.split(/\r?\n/),ni=0,ti=1,ji=-1,start=0;
+  var h=lines[0].toLowerCase().split(',').map(function(x){return x.trim()});
+  if(h.indexOf('name')>=0&&h.indexOf('team')>=0){
+    ni=h.indexOf('name');ti=h.indexOf('team');
+    ji=h.indexOf('num')>=0?h.indexOf('num'):(h.indexOf('jersey')>=0?h.indexOf('jersey'):h.indexOf('number'));start=1;
+  }
+  for(var i=start;i<lines.length;i++){
+    var c=lines[i].split(',').map(function(x){return x.trim()});if(c.length<2||!c[0])continue;
+    var j=ji>=0?ji:(c.length>=4?3:2);
+    var tm=resolveTeam(c[ti]);if(tm<0){miss.push(c[ni]+' (team '+c[ti]+'?)');continue}
+    cur.push({name:c[ni],team:tm,jersey:c[j]});
+  }
+  return {cur:cur,miss:miss};
+}
+function previewPasted(){
+  if(!CUR||!plOK()){st('Load the NBA2K20 ROS first');return}
+  buildIdx();
+  try{
+    var r=parseRosterText($('rtext').value);
+    if(!r.cur.length){st('No players could be read. Use lines like: Joel Embiid, PHI, 21','bad');return}
+    finishPreview(r.cur,r.miss,'pasted/loaded data');
+  }catch(e){$('applybtn').disabled=true;st('Could not read the data: '+e.message,'bad')}
+}
+async function loadRosterFile(ev){
+  var f=ev.target.files[0];if(!f)return;
+  $('rtext').value=await f.text();st('Loaded '+f.name+'. Now press Preview from pasted data.','ok');
+}
+
+function applyUpdate(){
+  if(!PLAN){st('Nothing to apply yet. Press "Preview changes" first (it needs internet).','bad');return}
+  var rel=$('relchk').checked,P=PLAN;
+  var total=P.moves.length+P.jers.length+(rel?P.release.length:0);
+  if(total===0){st('Nothing to change: the roster already matches the current rosters.','bad');return}
+  var lines=[];
+  P.moves.forEach(function(m){lines.push(NAMES[m[0]].first+' '+NAMES[m[0]].last+': '+(rowTeam(m[0])>=0x21400000&&rowTeam(m[0])<0x2140001e?TEAMS[rowTeam(m[0])-0x21400000]:'no team')+' -> '+TEAMS[m[1]-0x21400000])});
+  P.moves.forEach(function(m){setBits(CUR,rowBase(m[0])+224,32,m[1]);setBits(CUR,rowBase(m[0])+2610,32,m[1])});
+  P.jers.forEach(function(m){setBits(CUR,rowBase(m[0])+333,7,m[1])});
+  var n=0;if(rel){P.release.forEach(function(r){setBits(CUR,rowBase(r)+224,32,0);setBits(CUR,rowBase(r)+2610,32,0);n++})}
+  var bad=0;
+  P.moves.forEach(function(m){if(rowTeam(m[0])!==m[1]||fld(m[0],2610,32)!==m[1])bad++});
+  P.jers.forEach(function(m){if(fld(m[0],333,7)!==m[1])bad++});
+  $('res').textContent='APPLIED\nTeam changes written: '+P.moves.length+'\nJersey changes written: '+P.jers.length+'\nPlayers released: '+n+'\nVerification: '+(bad?bad+' values did not read back correctly':'all values read back correctly')+'\n\nTeam changes:\n'+lines.slice(0,60).join('\n');
+  st('Applied '+P.moves.length+' team changes, '+P.jers.length+' jersey changes'+(rel?', released '+n+' players':'')+'. Now press Export ROS.','ok');
+  PLAN=null;$('applybtn').disabled=true;
+}
+function findName(){
+  if(!CUR)return;buildIdx();var q=normName($('nq').value);var out=[];
+  for(var k in NIDX){if(k.indexOf(q)>=0){NIDX[k].forEach(function(r){out.push(r+': '+NAMES[r].first+' '+NAMES[r].last+'  team '+(rowTeam(r)>=0x21400000&&rowTeam(r)<0x2140001e?TEAMS[rowTeam(r)-0x21400000]:'none')+'  #'+fld(r,333,7))})}if(out.length>40)break}
+  $('res').textContent=out.length?out.join('\n'):'No match';
+}
+
+</script></body></html>
